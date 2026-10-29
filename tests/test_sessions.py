@@ -206,8 +206,11 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(app.state.active_sessions, 0)
 
     async def test_transport_write_failure_cleans_session(self):
+        failed = asyncio.Event()
+
         async def fail(event):
             if event["type"] == "websocket.send" and json.loads(event["text"])["type"] == "pong":
+                failed.set()
                 raise OSError("disconnected")
 
         async with app.router.lifespan_context(app):
@@ -215,6 +218,7 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
                 await outgoing.get()
                 await reply(outgoing)
                 await send(incoming, {"type": "ping"})
+                await asyncio.wait_for(failed.wait(), 1)
             self.assertEqual(app.state.active_sessions, 0)
 
     async def test_session_limits_reject_unbounded_or_invalid_settings(self):
@@ -227,6 +231,10 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
                         replace(SessionLimits(), **{name: value})
 
     async def test_invalid_discriminator_preserves_session_and_run(self):
+        with patch("avi.main.MockAgentAdapter", lambda: MockAgentAdapter(delay=60)):
+            await self._check_invalid_discriminators()
+
+    async def _check_invalid_discriminators(self):
         async with app.router.lifespan_context(app):
             async with connection() as (incoming, outgoing):
                 await outgoing.get()
