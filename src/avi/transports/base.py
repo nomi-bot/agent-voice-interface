@@ -1,0 +1,6 @@
+from typing import Protocol
+
+
+class TransportAdapter(Protocol):
+    async def receive(self) -> dict: ...
+    async def send(self, event: dict) -> None: ...
