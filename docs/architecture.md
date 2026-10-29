@@ -9,6 +9,17 @@ are contracts only; they are not wired into a media path. The orchestrator conta
 no Hermes-specific logic. Agent submission returns a run immediately; status and
 cancellation are capability-gated. Future adapters must never block the event loop.
 
+`ControlSession` owns a receiver, one sequential agent worker, and one writer in
+an asyncio task group. Bounded operation/reply queues keep adapter latency and
+transport backpressure from accumulating unbounded work. The receiver handles
+`ping` and `stop_playback` directly; they can overtake agent replies. Disconnect,
+idle expiry and send failure cancel the sibling tasks before closing the agent.
+Operation, send and cleanup deadlines are distinct; an operation timeout returns
+an error without being reported as an idle timeout. Async adapters must propagate
+cancellation and clean up their own resources, including any remote submission
+whose result is unknown after a timeout. Python cannot forcibly stop a coroutine
+that suppresses cancellation or blocks the event loop.
+
 Stopping playback, cancelling a model response, and cancelling an agent run are
 separate operations. A provider interruption should flush client playback without
 implicitly cancelling a run. Future sessions should outlive individual agent runs;

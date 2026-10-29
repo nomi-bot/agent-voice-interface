@@ -9,10 +9,17 @@ class VoiceOrchestrator:
     def __init__(self, agent: AgentAdapter):
         self.agent = agent
 
-    async def handle(self, message: dict) -> dict:
+    @staticmethod
+    def message_type(message: dict) -> str:
         if not isinstance(message, dict):
             raise ValueError("Expected a JSON object")
         kind = message.get("type")
+        if not isinstance(kind, str):
+            raise ValueError("type must be a string")
+        return kind
+
+    async def handle(self, message: dict) -> dict:
+        kind = self.message_type(message)
         if kind == "ping":
             return {"type": "pong"}
         if kind == "submit":

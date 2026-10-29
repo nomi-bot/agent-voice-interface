@@ -1,4 +1,6 @@
-from fastapi import WebSocket
+from fastapi import WebSocket, WebSocketDisconnect
+
+from avi.transports.base import TransportDisconnected
 
 
 class WebSocketTransport:
@@ -6,7 +8,19 @@ class WebSocketTransport:
         self.websocket = websocket
 
     async def receive(self) -> dict:
-        return await self.websocket.receive_json()
+        try:
+            return await self.websocket.receive_json()
+        except WebSocketDisconnect as exc:
+            raise TransportDisconnected from exc
 
     async def send(self, event: dict) -> None:
-        await self.websocket.send_json(event)
+        try:
+            await self.websocket.send_json(event)
+        except (WebSocketDisconnect, OSError) as exc:
+            raise TransportDisconnected from exc
+
+    async def close(self, code: int, reason: str) -> None:
+        try:
+            await self.websocket.close(code=code, reason=reason)
+        except (WebSocketDisconnect, OSError) as exc:
+            raise TransportDisconnected from exc

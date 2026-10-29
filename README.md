@@ -58,6 +58,16 @@ unsupported until a provider implements it. Runs belong to one session and are
 cancelled on disconnect. Each session retains at most 32 runs and expires after
 300 seconds without a message.
 
+Agent operations execute sequentially with a 30-second deadline. Receiving stays
+active during those operations, so `ping`, `stop_playback` and disconnects do not
+wait for an agent response. Control replies can overtake agent replies.
+There are at most 16 queued operations and 16 queued replies. Excess operations
+return an error; a full reply queue or a send stalled for 5 seconds closes the
+session with code 1013. Initial `ready` sends and close frames also have a
+5-second deadline. Adapter cleanup has a 5-second deadline. These are control-plane
+safeguards, not measured realtime audio guarantees. Adapters must cooperate with
+asyncio cancellation and must not run blocking work on the event loop.
+
 ## Security and integration boundaries
 
 Bind to loopback only. The WebSocket checks exact localhost origins on port 8000;
