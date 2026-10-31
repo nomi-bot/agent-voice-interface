@@ -1,9 +1,9 @@
 """AVIP v1 binary media frames and bounded delivery.
 
-This module is transport-independent. It does not open sockets, attach the
-session handshake, route audio to a provider, or conceal loss. A later
-WebSocket adapter can pass one complete binary message to ``unpack_frame``
-and submit the result here without defining a second layout.
+This module is transport-independent. It does not open sockets, route audio
+to a provider, or conceal loss. ``/ws/avip`` passes one complete binary
+message to ``unpack_frame`` and submits the result here. Text stays on the
+JSON control plane. Callers must not define a second layout.
 """
 
 from collections import deque

@@ -66,6 +66,15 @@
     {"name": "invalid message", "envelope": {"protocol": "avip/1", "type": "error", "code": "invalid_message", "field": null}},
     {"name": "unsupported protocol", "envelope": {"protocol": "avip/1", "type": "error", "code": "unsupported_protocol", "field": "protocol"}},
     {"name": "unsupported message type", "envelope": {"protocol": "avip/1", "type": "error", "code": "unsupported_message_type", "field": "type"}},
-    {"name": "duplicate session start", "envelope": {"protocol": "avip/1", "type": "error", "code": "session_already_started", "field": null}}
+    {"name": "duplicate session start", "envelope": {"protocol": "avip/1", "type": "error", "code": "session_already_started", "field": null}},
+    {"name": "bad media magic", "envelope": {"protocol": "avip/1", "type": "error", "code": "unsupported_protocol", "field": "magic"}},
+    {"name": "bad media version", "envelope": {"protocol": "avip/1", "type": "error", "code": "unsupported_protocol", "field": "version"}},
+    {"name": "invalid frame", "envelope": {"protocol": "avip/1", "type": "error", "code": "invalid_frame", "field": "header"}},
+    {"name": "bad direction", "envelope": {"protocol": "avip/1", "type": "error", "code": "invalid_frame", "field": "direction"}},
+    {"name": "bad codec", "envelope": {"protocol": "avip/1", "type": "error", "code": "unsupported_codec", "field": "codec"}},
+    {"name": "frame too large", "envelope": {"protocol": "avip/1", "type": "error", "code": "frame_too_large", "field": "payload"}},
+    {"name": "sequence anomaly", "envelope": {"protocol": "avip/1", "type": "error", "code": "sequence_anomaly", "field": "sequence"}},
+    {"name": "timestamp regression", "envelope": {"protocol": "avip/1", "type": "error", "code": "timestamp_regression", "field": "timestamp_us"}},
+    {"name": "queue full", "envelope": {"protocol": "avip/1", "type": "error", "code": "queue_full", "field": null}}
   ]
 }

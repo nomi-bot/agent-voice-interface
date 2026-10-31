@@ -27,7 +27,7 @@ AVI gateway: sessions | media router | events | capability registry | runs
 - Instrument latency, interruption, queue depth, errors and resources; do not claim performance targets before measurements.
 
 ## Present implementation versus desired behavior
-Current initialization skeleton includes FastAPI JSON WebSocket control, the `/ws/avip` session handshake, mock agent, bounded queues, and session-owned runs cancelled at disconnect on `/ws`. AVIP binary media framing exists as a transport-independent contract and is not accepted on `/ws/avip`. The skeleton does **not** implement a live PCM path, Gemini Live, Hermes, the remaining AVIP control events, or durable AgentRuns. Moving runs beyond voice-session lifetimes is a planned M2 change, not a current capability.
+Current initialization skeleton includes FastAPI JSON WebSocket control, the `/ws/avip` session handshake, mock PCM framing on that same socket, a mock agent, bounded queues, and session-owned runs cancelled at disconnect on `/ws`. Browser-shaped and headless clients share `/ws/avip`. The skeleton does **not** implement a live voice provider, Gemini Live, Hermes, the remaining AVIP control events, or durable AgentRuns. Moving runs beyond voice-session lifetimes is a planned M2 change, not a current capability.
 
 ## Documentation map
 - [Current architecture](../architecture.md): executable skeleton behavior.

@@ -1,4 +1,6 @@
 """Local-only development gateway. This skeleton has no live voice provider."""
+import os
+from collections.abc import Mapping
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, WebSocket
@@ -19,8 +21,23 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="AVI development gateway", lifespan=lifespan)
 ALLOWED_ORIGINS = {"http://localhost:8000", "http://127.0.0.1:8000"}
 SESSION_LIMITS = SessionLimits()
-# No media or robot integration is enabled. Negotiated bits stay false until one is.
-AVIP_CAPABILITIES = Capabilities()
+
+
+def development_capabilities(environ: Mapping[str, str] | None = None) -> Capabilities:
+    """Return the features this process can actually negotiate.
+
+    The default is none. ``AVIP_MOCK_MEDIA=1`` enables the M0 PCM mirror for
+    every client: audio input and audio output only. It does not enable a
+    voice provider, camera, display, or robot actions. Any other value leaves
+    every capability false.
+    """
+    source = os.environ if environ is None else environ
+    if source.get("AVIP_MOCK_MEDIA") == "1":
+        return Capabilities(audio_input=True, audio_output=True)
+    return Capabilities()
+
+
+AVIP_CAPABILITIES = development_capabilities()
 
 
 @app.get("/health")
