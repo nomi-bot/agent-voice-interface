@@ -1,0 +1,43 @@
+{
+  "endianness": "little",
+  "header_bytes": 24,
+  "magic_hex": "41564950",
+  "version": 1,
+  "protocol": "avip/1",
+  "codec": {"name": "pcm_s16le", "id": 1},
+  "directions": {"audio_uplink": 1, "audio_downlink": 2},
+  "sample_rate_hz": 16000,
+  "channels": 1,
+  "sample_width_bytes": 2,
+  "nominal_chunk_us": 20000,
+  "nominal_payload_bytes": 640,
+  "max_payload_bytes": 8192,
+  "max_queue_depth": 8,
+  "queue_policy": "reject_newest",
+  "vectors": [
+    {
+      "name": "uplink two zero samples at origin",
+      "direction": "audio_uplink",
+      "sequence": 0,
+      "timestamp_us": 0,
+      "payload_hex": "00000000",
+      "frame_hex": "41564950010101000000000000000000000000000400000000000000"
+    },
+    {
+      "name": "downlink one peak sample at 20ms",
+      "direction": "audio_downlink",
+      "sequence": 1,
+      "timestamp_us": 20000,
+      "payload_hex": "ff7f",
+      "frame_hex": "415649500102010001000000204e00000000000002000000ff7f"
+    },
+    {
+      "name": "little-endian sequence and timestamp",
+      "direction": "audio_uplink",
+      "sequence": 16909060,
+      "timestamp_us": 72623859790382856,
+      "payload_hex": "0000",
+      "frame_hex": "4156495001010100040302010807060504030201020000000000"
+    }
+  ]
+}

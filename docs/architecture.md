@@ -43,10 +43,12 @@ can replace the current session-owned policy.
 
 Client JSON objects: submit(request), status(run_id), cancel_task(run_id), ping,
 stop_playback, cancel_response. Server types: ready, run, pong, stop_playback,
-unsupported, error. There is no binary PCM protocol or microphone implementation yet.
-Malformed messages produce a generic error; runs cannot be accessed across sessions.
-An AVIP `session.start` sent to `/ws` is an unknown legacy message. It does not
-open an AVIP session.
+unsupported, error. There is no microphone implementation, and `/ws` has no
+binary audio path. Malformed messages produce a generic error; runs cannot be
+accessed across sessions. An AVIP `session.start` sent to `/ws` is an unknown
+legacy message. It does not open an AVIP session. AVIP media framing is a
+standalone contract in `avi.protocols.media`; neither `/ws` nor `/ws/avip`
+calls it. `/ws/avip` closes on binary frames.
 
 ## Observability plan
 
