@@ -11,6 +11,17 @@ FIXTURES = json.loads(
 )
 
 
+def _string_values(value):
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for item in value.values():
+            yield from _string_values(item)
+    elif isinstance(value, list):
+        for item in value:
+            yield from _string_values(item)
+
+
 class HandshakeTests(unittest.TestCase):
     def setUp(self):
         self.protocol = avip
@@ -111,6 +122,52 @@ class HandshakeTests(unittest.TestCase):
                 with self.assertRaises(self.protocol.ProtocolError) as caught:
                     self.protocol.session_ready(start, invalid, self.protocol.Capabilities())
                 self.assertEqual(caught.exception.field, "session_id")
+
+    def test_wire_envelopes_keep_only_allowlisted_codes_and_fields(self):
+        for item in FIXTURES["wire_errors"]:
+            envelope = item["envelope"]
+            built = self.protocol.error_envelope(
+                self.protocol.ProtocolError(envelope["code"], envelope["field"])
+            )
+            self.assertEqual(built, envelope)
+        for case in FIXTURES["invalid"]:
+            with self.subTest(case=case["name"]):
+                with self.assertRaises(self.protocol.ProtocolError) as caught:
+                    self.protocol.parse_session_start(case["message"])
+                envelope = self.protocol.error_envelope(caught.exception)
+                self.assertEqual(envelope, {
+                    "protocol": "avip/1",
+                    "type": "error",
+                    "code": case["code"],
+                    "field": case["field"],
+                })
+                encoded = json.dumps(envelope)
+                for value in _string_values(case["message"]):
+                    if value == "avip/1":
+                        continue
+                    self.assertNotIn(value, encoded)
+        leaked = self.protocol.ProtocolError("invalid_message", "device_id")
+        leaked.code = "LEAK9f3a"
+        leaked.field = ["LEAK9f3a"]
+        collapsed = self.protocol.error_envelope(leaked)
+        self.assertEqual(collapsed, {
+            "protocol": "avip/1",
+            "type": "error",
+            "code": "invalid_message",
+            "field": None,
+        })
+        self.assertNotIn("LEAK9f3a", json.dumps(collapsed))
+
+    def test_session_start_detection_is_only_the_type(self):
+        for case in FIXTURES["valid"]:
+            self.assertTrue(self.protocol.is_session_start(case["message"]))
+        self.assertFalse(self.protocol.is_session_start([]))
+        self.assertFalse(self.protocol.is_session_start(
+            {"type": "agent.run.cancel", "protocol": "avip/1"}
+        ))
+        self.assertTrue(self.protocol.is_session_start(
+            {"type": "session.start", "request_id": "not-validated"}
+        ))
 
     def test_invalid_protocol_and_type_values_do_not_raise_type_errors(self):
         for field in ("protocol", "type"):

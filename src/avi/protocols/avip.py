@@ -1,14 +1,26 @@
-"""AVIP v1 session handshake; not yet exposed by the legacy /ws endpoint."""
+"""AVIP v1 session handshake.
+
+The pure helpers below do not open sockets. ``/ws/avip`` uses them; the legacy
+``/ws`` control protocol does not.
+"""
 
 from dataclasses import asdict, dataclass, fields
 import re
 
 
 PROTOCOL = "avip/1"
+SESSION_START = "session.start"
 _IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}")
 _START_FIELDS = {
     "protocol", "type", "request_id", "session_id", "device_id", "capabilities",
 }
+_ERROR_CODES = frozenset({
+    "invalid_message",
+    "unsupported_protocol",
+    "unsupported_message_type",
+    "session_already_started",
+})
+_ERROR_FIELDS = frozenset(_START_FIELDS)
 
 
 class ProtocolError(ValueError):
@@ -62,7 +74,7 @@ def parse_session_start(message: object) -> SessionStart:
         raise ProtocolError("invalid_message")
     if message["protocol"] != PROTOCOL:
         raise ProtocolError("unsupported_protocol", "protocol")
-    if message["type"] != "session.start":
+    if message["type"] != SESSION_START:
         raise ProtocolError("unsupported_message_type", "type")
     if message["session_id"] is not None:
         raise ProtocolError("invalid_message", "session_id")
@@ -81,6 +93,32 @@ def parse_session_start(message: object) -> SessionStart:
             name: capabilities.get(name, False) for name in _CAPABILITY_NAMES
         }),
     )
+
+
+def is_session_start(message: object) -> bool:
+    """Return whether this value is a session-start attempt.
+
+    This checks only ``type``. It does not validate the envelope. A second
+    attempt on an open connection is rejected without being applied.
+    """
+    return isinstance(message, dict) and message.get("type") == SESSION_START
+
+
+def error_envelope(error: ProtocolError) -> dict:
+    """Build a server-authored error envelope.
+
+    ``code`` and ``field`` are copied only from closed allowlists. Exception
+    text and every client-supplied value are omitted. ``session_already_started``
+    is a connection-lifecycle code; the parser does not raise it.
+    """
+    code = error.code if isinstance(error.code, str) and error.code in _ERROR_CODES else None
+    field = error.field if isinstance(error.field, str) and error.field in _ERROR_FIELDS else None
+    return {
+        "protocol": PROTOCOL,
+        "type": "error",
+        "code": error.code if code is not None else "invalid_message",
+        "field": field if code is not None else None,
+    }
 
 
 def negotiate_capabilities(requested: Capabilities, available: Capabilities) -> Capabilities:

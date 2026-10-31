@@ -6,9 +6,14 @@ Agreed planning baseline, 2026-10-30. Engineering estimates are provisional, not
 Deliver client/voice/agent ports, shared AVIP v1 proposal, transport abstraction, capability negotiation, session/run state machines and mocked conformance tests.
 **Exit:** browser-shaped and headless Python mock clients connect to same gateway without special-case core logic.
 
-**Implementation progress:** initial session-handshake validation and capability
-negotiation have shared browser/headless fixtures. WebSocket integration, media
-framing, state machines and runnable client conformance remain; M0 is not complete.
+**Implementation progress:** `/ws/avip` serves the session handshake. A valid
+`session.start` returns `session.ready`. Invalid starts, duplicate starts and
+non-text frames return the stable error envelopes in the AVIP draft, then follow
+that draft's close rules. Disconnect drops the connection-scoped session.
+The development gateway advertises no capabilities. Legacy `/ws` is unchanged.
+Media framing, the remaining AVIP control and event messages, runnable browser
+and Python client conformance, and the VoiceSession / VoiceResponse / AgentRun
+state machines remain. M0 is not complete.
 
 ## M1: Real-Time Voice Streaming (5–7 days)
 Verify official Gemini SDK/model and audio/session/tool contracts and pin a tested SDK range; implement Gemini Live provider, browser mic/speaker and binary audio transport, format/resampling/buffering, session/errors and measurement instrumentation.
