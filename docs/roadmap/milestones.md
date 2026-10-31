@@ -11,9 +11,11 @@ Deliver client/voice/agent ports, shared AVIP v1 proposal, transport abstraction
 non-text frames return the stable error envelopes in the AVIP draft, then follow
 that draft's close rules. Disconnect drops the connection-scoped session.
 The development gateway advertises no capabilities. Legacy `/ws` is unchanged.
-Media framing, the remaining AVIP control and event messages, runnable browser
-and Python client conformance, and the VoiceSession / VoiceResponse / AgentRun
-state machines remain. M0 is not complete.
+Transport-independent binary media framing and bounded per-direction delivery
+have shared fixtures; `/ws/avip` does not decode those frames yet.
+The remaining AVIP control and event messages, runnable browser and Python
+client conformance, and the VoiceSession / VoiceResponse / AgentRun state
+machines remain. M0 is not complete.
 
 ## M1: Real-Time Voice Streaming (5–7 days)
 Verify official Gemini SDK/model and audio/session/tool contracts and pin a tested SDK range; implement Gemini Live provider, browser mic/speaker and binary audio transport, format/resampling/buffering, session/errors and measurement instrumentation.

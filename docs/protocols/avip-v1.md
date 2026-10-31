@@ -1,6 +1,7 @@
 # AVIP v1 protocol outline
-Status: **Draft — the session handshake is served on `/ws/avip`. Media framing,
-the remaining control and event messages, and runnable client conformance are
+Status: **Draft — the session handshake is served on `/ws/avip`. Binary media
+framing is a transport-independent contract and is not accepted on that socket.
+The remaining control and event messages, and runnable client conformance, are
 not implemented. `/ws/avip` is not wire-compatible with the legacy `/ws` JSON
 control protocol. M0 is not complete.**
 
@@ -110,17 +111,112 @@ these envelopes under `wire_errors`.
 4. Disconnect, idle timeout, or a fatal protocol close drops the id. Nothing is written to disk. A later connection starts over with `session_id: null` and receives a new id. The previous id is not a lookup key. Legacy `/ws` mock runs stay on their own sockets and still end when those sockets end. `/ws/avip` does not cancel, persist or resume them.
 5. A second JSON object whose `type` is `session.start` is `session_already_started`, whatever the other fields contain. The driver does not parse it as a new session and does not replace the id. It then closes the socket.
 6. Any other failure of the first frame closes the socket. A retry is a new connection.
-7. Text that is not a JSON object is `invalid_message` and closes with code 1002 and reason `Protocol error`. A binary frame is `invalid_message` and closes with code 1003 and reason `Unsupported data`. The bytes are not decoded, stored or forwarded. Binary media framing is still an open decision; this close is the stand-in until that contract exists.
+7. Text that is not a JSON object is `invalid_message` and closes with code 1002 and reason `Protocol error`. A binary frame is `invalid_message` and closes with code 1003 and reason `Unsupported data`. The bytes are not decoded, stored or forwarded. The binary frame contract below is not called from this path; this close remains until a later slice attaches it.
 8. After ready, a JSON object that is not a session start returns `unsupported_message_type` with `field: type` and the ready session stays up.
 9. A send that exceeds the shared send limit (currently 5 seconds) closes with code 1013 and reason `Send timeout`. The ready or error envelope may not have been delivered. A missing or foreign origin closes with code 1008 and an empty reason, before accept, and produces no AVIP envelope.
 
 Close reasons are fixed strings. They do not contain client data. There is no replay cursor and no reconnect handshake.
 
-## Open design decisions (M0)
-- Media codec, sample rate, chunk duration, frame header, timestamps, sequence numbers and endianness.
-- Binary audio framing and routing; explicit backpressure, queue drop policy, jitter behavior. Until that contract exists, `/ws/avip` closes on binary frames.
+## Binary media frames
+
+`avi.protocols.media` packs and unpacks one complete audio frame and applies a
+bounded delivery policy. It does not read sockets, attach `session.start`,
+route audio to a provider, or reassemble partial messages. `/ws/avip` still
+closes on binary frames, as the connection lifecycle above describes, and does
+not call `unpack_frame`. One buffer passed to `unpack_frame` is one frame. A
+later adapter can hand it a complete binary message without defining a second
+layout. Text messages stay on the JSON control plane.
+
+The M0 profile is mock PCM, chosen so a browser-shaped client and a headless
+Python client can share fixtures before a provider format is measured. It is
+not a Gemini Live format. `session.start` does not yet negotiate sample rate
+or codec; version byte 1 means this profile.
+
+| Field | Value |
+| --- | --- |
+| Codec | `pcm_s16le` (codec id 1): signed 16-bit little-endian samples |
+| Rate and channels | 16000 Hz, mono |
+| Nominal chunk | 20 ms, 640 payload bytes. Receivers must also accept any other even length from 2 through 8192 bytes |
+| Endianness | Multi-byte integers are little-endian. The magic is four raw bytes, not an integer |
+| Directions | 1 = `audio_uplink` (client capture toward AVI), 2 = `audio_downlink` (AVI audio toward the client) |
+
+Header layout, 24 bytes, then the payload:
+
+| Offset | Size | Field |
+| --- | --- | --- |
+| 0 | 4 | Magic `AVIP` (`41 56 49 50`) |
+| 4 | 1 | Version `1` |
+| 5 | 1 | Direction |
+| 6 | 1 | Codec |
+| 7 | 1 | Reserved, must be `0` |
+| 8 | 4 | Sequence, `uint32` |
+| 12 | 8 | `timestamp_us`, `uint64` |
+| 20 | 4 | Payload length, `uint32`, must equal the number of bytes that follow |
+| 24 | N | PCM payload |
+
+`timestamp_us` is the sender's media clock for that direction, in microseconds,
+from an epoch the sender chooses (often 0 on the first frame). It is not a wall
+clock. Compare it only with earlier timestamps on the same direction of the same
+stream. Do not subtract client and gateway timestamps, and do not subtract
+uplink from downlink.
+
+Each direction has its own sequence. The first frame must use sequence 0. Every
+later frame must be the previous sequence plus one, modulo 2^32
+(`next_sequence(0xFFFFFFFF) == 0`). A duplicate, gap, or rewind is
+`sequence_anomaly` and does not advance the stream. There is no resync.
+Timestamps do not wrap; a smaller `uint64` is `timestamp_regression`.
+
+Validation raises the same `ProtocolError` class as the handshake. Media codes
+are `invalid_frame`, `unsupported_protocol`, `unsupported_codec`,
+`frame_too_large`, `sequence_anomaly`, `timestamp_regression`, and `queue_full`.
+The optional `field` is a fixed token such as `magic`, `version`, `payload`, or
+`sequence`. These media codes are not in the `/ws/avip` wire allowlist, so the
+handshake `error_envelope` helper would rewrite them if it were called with one.
+Buffers larger than 8216 bytes are `frame_too_large` before the header is read.
+Error text does not include client bytes, sequence numbers, or declared lengths.
+A non-zero reserved byte, an unknown direction, a payload that is empty, odd, or
+a different length than the header, and any codec other than `pcm_s16le` are
+rejected. Unknown codecs are not stored or echoed.
+
+Language-neutral byte vectors live in
+[avip-v1-media.json](../../tests/fixtures/avip-v1-media.json).
+
+### Bounded delivery
+
+`MediaDelivery` keeps a separate FIFO for each direction. The default and
+maximum depth is 8 frames (160 ms at the nominal 20 ms chunk). `offer` on a
+full queue raises `queue_full` and does not drop the oldest frame or the frame
+being offered. Sequence state advances only after a frame is queued, so a
+refused frame keeps its sequence and can be retried unchanged once the consumer
+has taken a frame. Uplink pressure does not consume downlink capacity.
+
+`clear` is an explicit flush. It discards queued frames and does not reset the
+sequence. Overflow never flushes. This queue does not wait, reorder, conceal
+gaps, or close a socket. Jitter buffering is not part of M0: a missing sequence
+is an error, not a concealable loss. Playback delay, drop-oldest under measured
+latency, and mapping `queue_full` onto a WebSocket close remain later work.
+The control plane's existing reply-queue close is a separate limit.
+
+## Open design decisions
+Settled for the M0 media contract: mock PCM profile, header layout, endianness,
+sequence and timestamp rules, payload bounds, and reject-newest backpressure.
+The `/ws/avip` handshake, its wire error envelopes, duplicate `session.start`,
+and the connection close rules above are also settled. `/ws/avip` still closes
+binary frames with code 1003.
+
+Still open:
+
+- Accept these frames on `/ws/avip` instead of closing binary frames, and map
+  media `ProtocolError` codes onto wire envelopes.
+- Run browser-shaped and headless Python clients against one gateway. The
+  shared fixtures do not yet prove a live media connection.
+- Route framed audio through the gateway to a voice provider.
+- Negotiate a measured codec and sample rate in the handshake. Real-time
+  resampling, jitter buffering, and concealment wait on that measurement (M1)
+  and on full-duplex recovery (M3).
 - AuthN/AuthZ of devices and robot actions; when and how remote runs can be reattached. The handshake above does not define that policy.
-- Trace context and timestamp definitions; measure cross-host latency without unsynchronized clock subtraction.
+- Trace context beyond the media clock defined above, and a way to measure
+  cross-host latency without subtracting unsynchronized clocks.
 - Status/progress model for ROS 2 actions and cancellation acknowledgments.
 - VoiceSession, VoiceResponse and AgentRun state machines beyond this connection's start, ready and closed rules.
 
