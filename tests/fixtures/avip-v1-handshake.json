@@ -1,0 +1,71 @@
+{
+  "available_capabilities": {"audio_input": true, "audio_output": true},
+  "valid": [
+    {
+      "name": "browser audio client",
+      "message": {
+        "protocol": "avip/1",
+        "type": "session.start",
+        "request_id": "req-browser-001",
+        "session_id": null,
+        "device_id": "browser-demo-001",
+        "capabilities": {"audio_input": true, "audio_output": true, "camera": false, "display": false}
+      },
+      "negotiated": {"audio_input": true, "audio_output": true, "camera": false, "display": false, "robot_actions": false}
+    },
+    {
+      "name": "headless audio client",
+      "message": {
+        "protocol": "avip/1",
+        "type": "session.start",
+        "request_id": "req-python-001",
+        "session_id": null,
+        "device_id": "headless-sim-001",
+        "capabilities": {"audio_input": true, "audio_output": true, "robot_actions": true, "future_sensor": true}
+      },
+      "negotiated": {"audio_input": true, "audio_output": true, "camera": false, "display": false, "robot_actions": false}
+    },
+    {
+      "name": "control-only client",
+      "message": {
+        "protocol": "avip/1",
+        "type": "session.start",
+        "request_id": "req-control-001",
+        "session_id": null,
+        "device_id": "control-001",
+        "capabilities": {}
+      },
+      "negotiated": {"audio_input": false, "audio_output": false, "camera": false, "display": false, "robot_actions": false}
+    }
+  ],
+  "invalid": [
+    {"name": "array envelope", "message": [], "code": "invalid_message", "field": null},
+    {"name": "missing fields", "message": {}, "code": "invalid_message", "field": null},
+    {
+      "name": "unsupported version",
+      "message": {"protocol": "avip/2", "type": "session.start", "request_id": "req-1", "session_id": null, "device_id": "client-1", "capabilities": {}},
+      "code": "unsupported_protocol", "field": "protocol"
+    },
+    {
+      "name": "unsupported handshake type",
+      "message": {"protocol": "avip/1", "type": "agent.run.cancel", "request_id": "req-1", "session_id": null, "device_id": "client-1", "capabilities": {}},
+      "code": "unsupported_message_type", "field": "type"
+    },
+    {
+      "name": "session start cannot reattach",
+      "message": {"protocol": "avip/1", "type": "session.start", "request_id": "req-1", "session_id": "existing-session", "device_id": "client-1", "capabilities": {}},
+      "code": "invalid_message", "field": "session_id"
+    },
+    {
+      "name": "numeric capability is not a boolean",
+      "message": {"protocol": "avip/1", "type": "session.start", "request_id": "req-1", "session_id": null, "device_id": "client-1", "capabilities": {"audio_input": 1}},
+      "code": "invalid_message", "field": "capabilities"
+    }
+  ],
+  "wire_errors": [
+    {"name": "invalid message", "envelope": {"protocol": "avip/1", "type": "error", "code": "invalid_message", "field": null}},
+    {"name": "unsupported protocol", "envelope": {"protocol": "avip/1", "type": "error", "code": "unsupported_protocol", "field": "protocol"}},
+    {"name": "unsupported message type", "envelope": {"protocol": "avip/1", "type": "error", "code": "unsupported_message_type", "field": "type"}},
+    {"name": "duplicate session start", "envelope": {"protocol": "avip/1", "type": "error", "code": "session_already_started", "field": null}}
+  ]
+}

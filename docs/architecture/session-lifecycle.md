@@ -14,3 +14,13 @@ replay state, restart recovery, authorized reattachment and explicit legacy cuto
 Drain or explicitly cancel old session-owned runs and record their outcomes before
 enabling durable submissions; do not silently promote them. All gates must pass
 together. [ADR-009](../adr/009-agent-run-lifecycle.md) records the decision.
+
+## Implemented AVIP connection
+
+`/ws/avip` implements start → ready → closed for one WebSocket. The id is allocated
+by the gateway, kept on that connection, and dropped on disconnect, idle timeout
+or a fatal protocol close. A new socket sends `session.start` with `session_id`
+null and receives a new id. Duplicate starts on the open socket are rejected.
+This path has no AgentRun. The VoiceSession, VoiceResponse and AgentRun states
+above, including reconnect, remain the target model. See the
+[AVIP draft](../protocols/avip-v1.md) for envelopes and close codes.

@@ -1,6 +1,9 @@
-from fastapi import WebSocket, WebSocketDisconnect
+import json
 
-from avi.transports.base import TransportDisconnected
+from fastapi import WebSocket, WebSocketDisconnect
+from starlette.websockets import WebSocketDisconnected
+
+from avi.transports.base import TransportDisconnected, TransportFrameError
 
 
 class WebSocketTransport:
@@ -12,6 +15,29 @@ class WebSocketTransport:
             return await self.websocket.receive_json()
         except WebSocketDisconnect as exc:
             raise TransportDisconnected from exc
+
+    async def receive_json_object(self) -> dict:
+        """Return one JSON object from a text frame.
+
+        Binary frames and text that is not a JSON object raise TransportFrameError.
+        The frame contents are not attached to that exception.
+        """
+        try:
+            message = await self.websocket.receive()
+        except (WebSocketDisconnect, WebSocketDisconnected) as exc:
+            raise TransportDisconnected from exc
+        if message["type"] == "websocket.disconnect":
+            raise TransportDisconnected
+        text = message.get("text")
+        if not isinstance(text, str):
+            raise TransportFrameError(binary=True)
+        try:
+            value = json.loads(text)
+        except json.JSONDecodeError:
+            raise TransportFrameError(binary=False) from None
+        if not isinstance(value, dict):
+            raise TransportFrameError(binary=False)
+        return value
 
     async def send(self, event: dict) -> None:
         try:

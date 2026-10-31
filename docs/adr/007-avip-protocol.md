@@ -17,8 +17,9 @@ asynchronous events, negotiated capabilities and correlation IDs. It realizes th
 client/transport boundary in [ADR-006](006-hexagonal-architecture.md) and preserves
 [ADR-004](004-agent-independence.md)'s capability-gated agent behavior.
 The [AVIP outline](../protocols/avip-v1.md) is illustrative; M0 must settle schema,
-framing, compatibility and errors. The current socket remains a separate legacy
-protocol until an explicit migration; AVIP compatibility is not implemented.
+framing, compatibility and errors. Legacy `/ws` remains a separate protocol until
+an explicit migration. `/ws/avip` implements the initial session handshake only;
+media, the remaining control messages and compatibility with `/ws` are still open.
 
 ## Alternatives and consequences
 

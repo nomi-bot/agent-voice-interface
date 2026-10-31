@@ -22,6 +22,13 @@ has been validated. Provider placeholders fail explicitly rather than simulating
 a successful integration. No Google SDK dependency or unverified model ID is
 introduced.
 
+M0 is in progress. The gateway validates the AVIP v1 session handshake and serves
+it on `/ws/avip`. A ready session lasts only as long as that socket; when the
+socket closes, the session id is gone. The development gateway advertises no
+audio, camera, display or robot capability. `/ws` still uses the legacy control
+protocol below. Media framing and runnable browser or Python conformance clients
+are still ahead, so M0 is not complete.
+
 ## Local development (macOS / Mac Mini)
 
 Install Python 3.12 or newer (for example, Homebrew: `brew install python@3.12`).
@@ -73,11 +80,37 @@ session with code 1013. Initial `ready` sends and close frames also have a
 safeguards, not measured realtime audio guarantees. Adapters must cooperate with
 asyncio cancellation and must not run blocking work on the event loop.
 
+## AVIP handshake
+
+`/ws/avip` is a separate socket from the legacy control protocol. With the server
+running as above, a browser on `http://127.0.0.1:8000` can open it from the
+developer console:
+
+```js
+const avip = new WebSocket("ws://127.0.0.1:8000/ws/avip");
+avip.onmessage = e => console.log(JSON.parse(e.data));
+avip.onopen = () => avip.send(JSON.stringify({
+  protocol: "avip/1",
+  type: "session.start",
+  request_id: "req-001",
+  session_id: null,
+  device_id: "browser-demo-001",
+  capabilities: {audio_input: true, audio_output: true}
+}));
+```
+
+The `session.ready` reply carries a gateway-assigned `session_id` and all five
+capabilities set to false: requesting audio does not enable a media path. Closing
+the socket discards that id. A second `session.start` on the same socket returns
+`session_already_started` and the server closes the connection. Error envelopes
+contain only `protocol`, `type`, `code` and `field`. The rules and close codes
+are in the [AVIP draft](docs/protocols/avip-v1.md).
+
 ## Security and integration boundaries
 
-Bind to loopback only. The WebSocket checks exact localhost origins on port 8000;
-this is defense in depth, **not authentication**. Do not expose the development
-service through a proxy or bind it remotely. Mock requests execute no tools.
+Bind to loopback only. Both `/ws` and `/ws/avip` check exact localhost origins on
+port 8000; this is defense in depth, **not authentication**. Do not expose the
+development service through a proxy or bind it remotely. Mock requests execute no tools.
 Future agent integrations must retain their own authorisation and approval
 controls. Treat voice transcripts and tool arguments as untrusted input.
 
@@ -87,7 +120,7 @@ controls. Treat voice transcripts and tool arguments as untrusted input.
 
 Level-2 component overview from accepted ADRs (clients → AVIP media/control/events → Transport → Gateway core → VoiceProvider/AgentAdapter → Gemini Live / Hermes). ROS 2 bridge is client-side; v0.1 mock actions only.
 
-The drawing is the accepted direction beside the initialization skeleton. It does not mean Gemini Live, Hermes, AVIP, or durable runs are implemented. The same map is in the [interactive overview](docs/architecture/avi-l2-architecture.html); [avi-l2-candidate.json](docs/architecture/avi-l2-candidate.json) is the source used to generate it.
+The drawing is the accepted direction beside the initialization skeleton. It does not mean Gemini Live, Hermes, AVIP media, or durable runs are implemented. The `/ws/avip` handshake is the only AVIP behavior in the skeleton. The same map is in the [interactive overview](docs/architecture/avi-l2-architecture.html); [avi-l2-candidate.json](docs/architecture/avi-l2-candidate.json) is the source used to generate it.
 
 ## Documentation map
 
@@ -96,7 +129,8 @@ The drawing is the accepted direction beside the initialization skeleton. It doe
   provider integration, AVIP and durable runs are planned capabilities.
 - [Canonical roadmap](docs/roadmap/milestones.md): M0–M4 scope and required exit gates,
   including the complete M2 ownership, authorization, persistence and migration gates.
-- [AVIP draft](docs/protocols/avip-v1.md): proposed protocol, separate from the current socket.
+- [AVIP draft](docs/protocols/avip-v1.md): `/ws/avip` handshake, error envelopes
+  and the decisions still open. Legacy `/ws` is a separate socket.
 - [ADR index and policy](docs/adr/README.md): one three-digit sequence, 001–010.
   ADRs 001–005 remain accepted; 006–010 extend them with explicit lineage.
 
