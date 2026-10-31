@@ -5,3 +5,7 @@ The orchestrator depends on AgentAdapter. Hermes-specific logic belongs in its
 adapter. Do not invent Hermes endpoints: integration remains explicitly pending
 until source or official documentation establishes the contract. Advertise status
 and cancellation only if the actual adapter supports them.
+
+## Related decision
+
+This ADR remains accepted. [009](009-agent-run-lifecycle.md): Adds target run ownership and recovery; implementation remains gated on M2.

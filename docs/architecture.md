@@ -1,4 +1,7 @@
-# Architecture
+# Current skeleton architecture
+
+This page describes executable behavior. See the [target architecture](architecture/overview.md)
+and [canonical roadmap](roadmap/milestones.md) for planned changes.
 
 Browser / future robot → TransportAdapter → VoiceOrchestrator →
 VoiceProvider and AgentAdapter. DeviceAdapter describes hardware capabilities.
@@ -22,9 +25,11 @@ that suppresses cancellation or blocks the event loop.
 
 Stopping playback, cancelling a model response, and cancelling an agent run are
 separate operations. A provider interruption should flush client playback without
-implicitly cancelling a run. Future sessions should outlive individual agent runs;
+implicitly cancelling a run. Target durable agent runs should outlive individual voice sessions;
 the mock deliberately cancels session-owned work on disconnect to avoid orphan tasks.
-Durable runs require explicit ownership, storage and reconnection policy.
+Durable runs require explicit ownership, storage and reconnection policy. All
+[M2 exit gates](roadmap/milestones.md#m2-exit-gates) must pass before that behavior
+can replace the current session-owned policy.
 
 ## Protocol (initial control plane)
 

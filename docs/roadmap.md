@@ -1,17 +1,27 @@
-# Next implementation milestones
+# Legacy roadmap
 
-1. Verify current Google GenAI SDK, Live model availability and documented audio
-   formats, session expiry, interruption and tool semantics against official docs.
-   Pin a tested compatible SDK range. No model identifier is selected yet.
-2. Build the smallest browser → gateway → Gemini PCM audio path, keeping the key
-   server-side. Use bounded queues, explicit audio rates and immediate playback flush.
-3. Test overlapping input/output, barge-in, disconnect/reconnect, errors and timeouts
-   using actual hardware and credentials; record evidence and limitations.
-4. Wire provider tool events to the deterministic mock adapter while audio streams.
-   Validate arguments and preserve distinct speech / response / task cancellation.
-5. Inspect Hermes source or official documentation and record a verified integration
-   contract, permissions, status and cancellation support before implementing it.
-6. Add monotonic latency metrics, client buffering/underrun telemetry and per-session
-   resource experiments. Benchmark topology before moving the audio data plane.
+**Superseded by [roadmap/milestones.md](roadmap/milestones.md)**, the canonical
+AVI v0.1 M0–M4 plan. This page is a historical mapping, not a second backlog.
 
-The full engineering v0.1 MVP is not complete with this initialization PR.
+The original initialization milestones map to that plan as follows:
+
+1. Verify Google GenAI SDK, Live model availability, audio/session/interruption/tool
+   semantics and pin the tested SDK range → **M1**, after **M0** defines AVI's ports
+   and AVIP proposal.
+2. Build browser → gateway → Gemini PCM audio with server-side keys and bounded
+   buffering → **M1**.
+3. Validate overlapping audio, barge-in, reconnect, errors and timeouts on real
+   hardware/credentials → **M1** baseline evidence and **M3** robustness gates.
+4. Route provider tool events to the mock adapter, validate arguments and separate
+   playback/response/task cancellation → **M0** contracts, **M2** real delegation
+   and **M3** interruption tests.
+5. Verify Hermes contracts, permissions, status and cancellation before integration
+   → **M2**, including its ownership, persistence and migration exit gates.
+6. Instrument monotonic latency, buffering/underruns and resource experiments;
+   benchmark before changing topology → **M1** instrumentation, **M3** measurements
+   and **M4** stability/release evidence.
+
+**M0** adds the device-neutral foundation before provider integration. **M4** adds
+the Python SDK, simulated robot and optional ROS 2 mock-action bridge; physical
+actuation is excluded. See the canonical plan for scope, estimates and exit gates.
+The initialization skeleton does not complete the engineering v0.1 MVP.

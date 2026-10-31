@@ -7,7 +7,7 @@ agent runtimes and model vendors. It is not an agent framework.
 
 ## Current status: initialization skeleton
 
-This first PR supplies a Python 3.12+ FastAPI gateway, four adapter contracts,
+The current implementation supplies a Python 3.12+ FastAPI gateway, four adapter contracts,
 an asynchronous mock agent, a JSON WebSocket control protocol, tests and CI.
 The original Apache-2.0 LICENSE is preserved.
 
@@ -76,9 +76,20 @@ service through a proxy or bind it remotely. Mock requests execute no tools.
 Future agent integrations must retain their own authorisation and approval
 controls. Treat voice transcripts and tool arguments as untrusted input.
 
-See [architecture](docs/architecture.md), [ADRs](docs/adr/) and
-[implementation roadmap](docs/roadmap.md). Gemini SDK/model selection, live
-audio validation and a source-verified Hermes contract are the next milestones.
+## Documentation map
+
+- [Current architecture](docs/architecture.md): executable skeleton behavior and limitations.
+- [Target architecture](docs/architecture/overview.md): accepted device-neutral direction;
+  provider integration, AVIP and durable runs are planned capabilities.
+- [Canonical roadmap](docs/roadmap/milestones.md): M0–M4 scope and required exit gates,
+  including the complete M2 ownership, authorization, persistence and migration gates.
+- [AVIP draft](docs/protocols/avip-v1.md): proposed protocol, separate from the current socket.
+- [ADR index and policy](docs/adr/README.md): one three-digit sequence, 001–010.
+  ADRs 001–005 remain accepted; 006–010 extend them with explicit lineage.
+
+The [legacy roadmap](docs/roadmap.md) redirects to the canonical plan and maps its
+original milestones. v0.1 robotics scope is a simulator and optional ROS 2 bridge
+with mock actions only; no physical actuation.
 
 ## License
 
