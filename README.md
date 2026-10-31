@@ -1,5 +1,10 @@
 # Agent Voice Interface (AVI)
 
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+[![Last commit](https://img.shields.io/github/last-commit/nomi-bot/agent-voice-interface)](https://github.com/nomi-bot/agent-voice-interface/commits/main)
+[![Commit activity](https://img.shields.io/github/commit-activity/m/nomi-bot/agent-voice-interface)](https://github.com/nomi-bot/agent-voice-interface/graphs/commit-activity)
+![Status: initialization skeleton](https://img.shields.io/badge/status-initialization_skeleton-yellow.svg)
+
 Give every AI agent and robot a natural voice.
 
 AVI is an open-source, plug-and-play voice interaction layer, independent of
@@ -75,6 +80,14 @@ this is defense in depth, **not authentication**. Do not expose the development
 service through a proxy or bind it remotely. Mock requests execute no tools.
 Future agent integrations must retain their own authorisation and approval
 controls. Treat voice transcripts and tool arguments as untrusted input.
+
+## System architecture
+
+![AVI L2 component overview](docs/architecture/avi-l2-overview.png)
+
+Level-2 component overview from accepted ADRs (clients → AVIP media/control/events → Transport → Gateway core → VoiceProvider/AgentAdapter → Gemini Live / Hermes). ROS 2 bridge is client-side; v0.1 mock actions only.
+
+The drawing is the accepted direction beside the initialization skeleton. It does not mean Gemini Live, Hermes, AVIP, or durable runs are implemented. The same map is in the [interactive overview](docs/architecture/avi-l2-architecture.html); [avi-l2-candidate.json](docs/architecture/avi-l2-candidate.json) is the source used to generate it.
 
 ## Documentation map
 

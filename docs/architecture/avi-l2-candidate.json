@@ -1,0 +1,688 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "AVI L2 component overview",
+    "locale": "en",
+    "quality_profile": "showcase",
+    "output": ".archify/architecture-avi-l2-20261031-231606/avi-l2-architecture.html",
+    "repository": {
+      "url": "https://github.com/nomi-bot/agent-voice-interface",
+      "provider": "github",
+      "revision": "fb20c1ac2bfc5a3f90ff15925a69f807fd586682"
+    }
+  },
+  "components": [
+    {
+      "id": "browser",
+      "type": "frontend",
+      "label": "Browser TS SDK",
+      "sublabel": "capture \u00b7 playback \u00b7 AVIP",
+      "pos": [
+        40,
+        40
+      ],
+      "size": [
+        168,
+        64
+      ],
+      "sources": [
+        {
+          "path": "docs/architecture/component-design.md"
+        }
+      ]
+    },
+    {
+      "id": "py_sdk",
+      "type": "frontend",
+      "label": "Python headless SDK",
+      "sublabel": "robot simulator client",
+      "pos": [
+        40,
+        140
+      ],
+      "size": [
+        168,
+        64
+      ],
+      "sources": [
+        {
+          "path": "docs/architecture/component-design.md"
+        },
+        {
+          "path": "docs/adr/010-robot-client-integration.md"
+        }
+      ]
+    },
+    {
+      "id": "ros2",
+      "type": "external",
+      "label": "ROS 2 bridge",
+      "sublabel": "optional client process",
+      "pos": [
+        40,
+        250
+      ],
+      "size": [
+        168,
+        64
+      ],
+      "tag": "mock actions only",
+      "sources": [
+        {
+          "path": "docs/adr/010-robot-client-integration.md"
+        }
+      ]
+    },
+    {
+      "id": "device",
+      "type": "frontend",
+      "label": "DeviceAction port",
+      "sublabel": "typed request/status",
+      "pos": [
+        40,
+        360
+      ],
+      "size": [
+        168,
+        64
+      ],
+      "sources": [
+        {
+          "path": "docs/architecture/component-design.md"
+        }
+      ]
+    },
+    {
+      "id": "avip_media",
+      "type": "messagebus",
+      "label": "AVIP media",
+      "sublabel": "framed audio",
+      "pos": [
+        280,
+        60
+      ],
+      "size": [
+        140,
+        56
+      ],
+      "sources": [
+        {
+          "path": "docs/adr/007-avip-protocol.md"
+        },
+        {
+          "path": "docs/protocols/avip-v1.md"
+        }
+      ]
+    },
+    {
+      "id": "avip_ctrl",
+      "type": "messagebus",
+      "label": "AVIP control",
+      "sublabel": "ordered commands",
+      "pos": [
+        280,
+        160
+      ],
+      "size": [
+        140,
+        56
+      ],
+      "sources": [
+        {
+          "path": "docs/adr/007-avip-protocol.md"
+        }
+      ]
+    },
+    {
+      "id": "avip_evt",
+      "type": "messagebus",
+      "label": "AVIP events",
+      "sublabel": "async fan-out",
+      "pos": [
+        280,
+        260
+      ],
+      "size": [
+        140,
+        56
+      ],
+      "sources": [
+        {
+          "path": "docs/adr/007-avip-protocol.md"
+        }
+      ]
+    },
+    {
+      "id": "transport",
+      "type": "backend",
+      "label": "Transport port",
+      "sublabel": "WS first \u00b7 backpressure",
+      "pos": [
+        480,
+        160
+      ],
+      "size": [
+        160,
+        64
+      ],
+      "tag": "WebRTC later",
+      "sources": [
+        {
+          "path": "docs/adr/008-transport-abstraction.md"
+        },
+        {
+          "path": "docs/architecture/component-design.md"
+        }
+      ]
+    },
+    {
+      "id": "sess_mgr",
+      "type": "backend",
+      "label": "Session manager",
+      "sublabel": "VoiceSession SM",
+      "pos": [
+        720,
+        40
+      ],
+      "size": [
+        150,
+        56
+      ],
+      "sources": [
+        {
+          "path": "docs/architecture/session-lifecycle.md"
+        },
+        {
+          "path": "docs/architecture/overview.md"
+        }
+      ]
+    },
+    {
+      "id": "corr",
+      "type": "backend",
+      "label": "Correlation IDs",
+      "sublabel": "session\u00b7turn\u00b7run",
+      "pos": [
+        720,
+        120
+      ],
+      "size": [
+        150,
+        56
+      ],
+      "sources": [
+        {
+          "path": "docs/architecture/session-lifecycle.md"
+        }
+      ]
+    },
+    {
+      "id": "caps",
+      "type": "backend",
+      "label": "Capability registry",
+      "sublabel": "negotiation",
+      "pos": [
+        720,
+        200
+      ],
+      "size": [
+        150,
+        56
+      ],
+      "sources": [
+        {
+          "path": "docs/architecture/component-design.md"
+        }
+      ]
+    },
+    {
+      "id": "media_rt",
+      "type": "backend",
+      "label": "Media router",
+      "sublabel": "ingress \u00b7 egress",
+      "pos": [
+        720,
+        280
+      ],
+      "size": [
+        150,
+        56
+      ],
+      "sources": [
+        {
+          "path": "docs/architecture/component-design.md"
+        },
+        {
+          "path": "docs/architecture/overview.md"
+        }
+      ]
+    },
+    {
+      "id": "evt_rt",
+      "type": "backend",
+      "label": "Event routing",
+      "sublabel": "ordered replay cursor",
+      "pos": [
+        900,
+        80
+      ],
+      "size": [
+        150,
+        56
+      ],
+      "sources": [
+        {
+          "path": "docs/architecture/component-design.md"
+        },
+        {
+          "path": "docs/adr/009-agent-run-lifecycle.md"
+        }
+      ]
+    },
+    {
+      "id": "run_mgr",
+      "type": "backend",
+      "label": "Agent run manager",
+      "sublabel": "ownership \u00b7 TTL \u00b7 M2",
+      "pos": [
+        900,
+        180
+      ],
+      "size": [
+        150,
+        56
+      ],
+      "sources": [
+        {
+          "path": "docs/adr/009-agent-run-lifecycle.md"
+        },
+        {
+          "path": "docs/architecture/session-lifecycle.md"
+        }
+      ]
+    },
+    {
+      "id": "telemetry",
+      "type": "backend",
+      "label": "Telemetry",
+      "sublabel": "latency \u00b7 queues",
+      "pos": [
+        900,
+        280
+      ],
+      "size": [
+        150,
+        56
+      ],
+      "sources": [
+        {
+          "path": "docs/architecture.md"
+        },
+        {
+          "path": "docs/architecture/component-design.md"
+        }
+      ]
+    },
+    {
+      "id": "voice_orch",
+      "type": "backend",
+      "label": "Voice orchestrator",
+      "sublabel": "skeleton control plane",
+      "pos": [
+        1080,
+        160
+      ],
+      "size": [
+        160,
+        64
+      ],
+      "sources": [
+        {
+          "path": "docs/architecture.md"
+        }
+      ]
+    },
+    {
+      "id": "vp",
+      "type": "backend",
+      "label": "VoiceProvider port",
+      "sublabel": "connect \u00b7 audio \u00b7 interrupt",
+      "pos": [
+        1280,
+        80
+      ],
+      "size": [
+        170,
+        64
+      ],
+      "sources": [
+        {
+          "path": "docs/architecture/component-design.md"
+        }
+      ]
+    },
+    {
+      "id": "aa",
+      "type": "backend",
+      "label": "AgentAdapter port",
+      "sublabel": "submit \u00b7 status \u00b7 cancel",
+      "pos": [
+        1280,
+        200
+      ],
+      "size": [
+        170,
+        64
+      ],
+      "sources": [
+        {
+          "path": "docs/architecture/component-design.md"
+        },
+        {
+          "path": "docs/adr/004-agent-independence.md"
+        }
+      ]
+    },
+    {
+      "id": "gemini",
+      "type": "external",
+      "label": "Gemini Live",
+      "sublabel": "planned voice provider",
+      "pos": [
+        1500,
+        60
+      ],
+      "size": [
+        150,
+        64
+      ],
+      "sources": [
+        {
+          "path": "docs/adr/002-transport-topology.md"
+        },
+        {
+          "path": "docs/architecture/overview.md"
+        }
+      ]
+    },
+    {
+      "id": "hermes",
+      "type": "external",
+      "label": "Hermes",
+      "sublabel": "planned agent runtime",
+      "pos": [
+        1500,
+        220
+      ],
+      "size": [
+        150,
+        64
+      ],
+      "sources": [
+        {
+          "path": "docs/adr/004-agent-independence.md"
+        }
+      ]
+    },
+    {
+      "id": "keys",
+      "type": "security",
+      "label": "Provider keys",
+      "sublabel": "server-side only",
+      "pos": [
+        1500,
+        340
+      ],
+      "size": [
+        150,
+        56
+      ],
+      "sources": [
+        {
+          "path": "docs/adr/002-transport-topology.md"
+        },
+        {
+          "path": "docs/adr/005-security-boundaries.md"
+        }
+      ]
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "Clients + device side",
+      "wraps": [
+        "browser",
+        "py_sdk",
+        "ros2",
+        "device"
+      ]
+    },
+    {
+      "kind": "region",
+      "label": "AVIP v1 contract",
+      "wraps": [
+        "avip_media",
+        "avip_ctrl",
+        "avip_evt"
+      ]
+    },
+    {
+      "kind": "region",
+      "label": "AVI Gateway core",
+      "wraps": [
+        "sess_mgr",
+        "corr",
+        "caps",
+        "media_rt",
+        "evt_rt",
+        "run_mgr",
+        "telemetry",
+        "voice_orch"
+      ]
+    },
+    {
+      "kind": "region",
+      "label": "Provider adapters",
+      "wraps": [
+        "vp",
+        "aa",
+        "gemini",
+        "hermes",
+        "keys"
+      ]
+    },
+    {
+      "kind": "security-group",
+      "label": "credentials stay server-side",
+      "wraps": [
+        "keys"
+      ]
+    }
+  ],
+  "connections": [
+    {
+      "id": "py-ros",
+      "from": "py_sdk",
+      "to": "ros2",
+      "label": "optional",
+      "variant": "dashed",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "id": "ros-dev",
+      "from": "ros2",
+      "to": "device",
+      "label": "allowlist",
+      "variant": "security",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "id": "br-media",
+      "from": "browser",
+      "to": "avip_media",
+      "label": "audio",
+      "variant": "emphasis"
+    },
+    {
+      "id": "br-ctrl",
+      "from": "browser",
+      "to": "avip_ctrl",
+      "label": "control"
+    },
+    {
+      "id": "py-ctrl",
+      "from": "py_sdk",
+      "to": "avip_ctrl",
+      "label": "control",
+      "variant": "emphasis"
+    },
+    {
+      "id": "py-evt",
+      "from": "py_sdk",
+      "to": "avip_evt",
+      "label": "events"
+    },
+    {
+      "id": "m-tr",
+      "from": "avip_media",
+      "to": "transport"
+    },
+    {
+      "id": "c-tr",
+      "from": "avip_ctrl",
+      "to": "transport",
+      "variant": "emphasis"
+    },
+    {
+      "id": "e-tr",
+      "from": "avip_evt",
+      "to": "transport"
+    },
+    {
+      "id": "tr-sess",
+      "from": "transport",
+      "to": "sess_mgr",
+      "fromSide": "top",
+      "toSide": "left"
+    },
+    {
+      "id": "tr-media",
+      "from": "transport",
+      "to": "media_rt",
+      "label": "framed media",
+      "variant": "emphasis"
+    },
+    {
+      "id": "tr-evt",
+      "from": "transport",
+      "to": "evt_rt",
+      "fromSide": "right",
+      "toSide": "left"
+    },
+    {
+      "id": "sess-corr",
+      "from": "sess_mgr",
+      "to": "corr"
+    },
+    {
+      "id": "corr-run",
+      "from": "corr",
+      "to": "run_mgr",
+      "label": "run_id"
+    },
+    {
+      "id": "caps-orch",
+      "from": "caps",
+      "to": "voice_orch"
+    },
+    {
+      "id": "media-orch",
+      "from": "media_rt",
+      "to": "voice_orch",
+      "variant": "emphasis"
+    },
+    {
+      "id": "run-orch",
+      "from": "run_mgr",
+      "to": "voice_orch"
+    },
+    {
+      "id": "tel-orch",
+      "from": "telemetry",
+      "to": "voice_orch",
+      "variant": "dashed"
+    },
+    {
+      "id": "evt-run",
+      "from": "evt_rt",
+      "to": "run_mgr",
+      "label": "replay"
+    },
+    {
+      "id": "orch-vp",
+      "from": "voice_orch",
+      "to": "vp",
+      "label": "voice path",
+      "variant": "emphasis"
+    },
+    {
+      "id": "orch-aa",
+      "from": "voice_orch",
+      "to": "aa",
+      "label": "agent path",
+      "variant": "emphasis"
+    },
+    {
+      "id": "vp-gem",
+      "from": "vp",
+      "to": "gemini",
+      "label": "voice"
+    },
+    {
+      "id": "aa-her",
+      "from": "aa",
+      "to": "hermes",
+      "label": "agent"
+    },
+    {
+      "id": "keys-orch",
+      "from": "keys",
+      "to": "voice_orch",
+      "label": "server keys",
+      "variant": "security",
+      "fromSide": "left",
+      "toSide": "bottom"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Ports (hexagonal)",
+      "items": [
+        "Transport, VoiceProvider, AgentAdapter, DeviceAction keep providers and devices out of gateway core",
+        "AVIP splits media, reliable control, and async events"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Gateway core",
+      "items": [
+        "Session manager + correlation IDs for VoiceSession / VoiceResponse / AgentRun",
+        "Capability registry, media router, event routing, run manager, telemetry"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "Skeleton vs target",
+      "items": [
+        "Today: FastAPI JSON WS + mock agent; session-owned runs cancel on disconnect",
+        "Target: Gemini Live + Hermes via ports; durable runs only after all M2 gates",
+        "ROS 2 bridge stays client-side; v0.1 mock actions only, no motors"
+      ]
+    }
+  ]
+}
