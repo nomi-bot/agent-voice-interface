@@ -22,6 +22,10 @@ has been validated. Provider placeholders fail explicitly rather than simulating
 a successful integration. No Google SDK dependency or unverified model ID is
 introduced.
 
+The first M0 implementation slice adds standalone AVIP session-handshake validation
+and capability negotiation, with shared browser/headless fixtures. It is not yet
+connected to an endpoint; `/ws` still uses the legacy control protocol described below.
+
 ## Local development (macOS / Mac Mini)
 
 Install Python 3.12 or newer (for example, Homebrew: `brew install python@3.12`).
@@ -96,7 +100,8 @@ The drawing is the accepted direction beside the initialization skeleton. It doe
   provider integration, AVIP and durable runs are planned capabilities.
 - [Canonical roadmap](docs/roadmap/milestones.md): M0–M4 scope and required exit gates,
   including the complete M2 ownership, authorization, persistence and migration gates.
-- [AVIP draft](docs/protocols/avip-v1.md): proposed protocol, separate from the current socket.
+- [AVIP draft](docs/protocols/avip-v1.md): initial handshake contract and remaining
+  protocol decisions, separate from the current socket.
 - [ADR index and policy](docs/adr/README.md): one three-digit sequence, 001–010.
   ADRs 001–005 remain accepted; 006–010 extend them with explicit lineage.
 
