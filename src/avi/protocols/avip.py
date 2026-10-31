@@ -19,8 +19,24 @@ _ERROR_CODES = frozenset({
     "unsupported_protocol",
     "unsupported_message_type",
     "session_already_started",
+    "invalid_frame",
+    "unsupported_codec",
+    "frame_too_large",
+    "sequence_anomaly",
+    "timestamp_regression",
+    "queue_full",
 })
-_ERROR_FIELDS = frozenset(_START_FIELDS)
+_ERROR_FIELDS = frozenset(_START_FIELDS | {
+    "magic",
+    "version",
+    "direction",
+    "codec",
+    "reserved",
+    "sequence",
+    "timestamp_us",
+    "payload",
+    "header",
+})
 
 
 class ProtocolError(ValueError):
@@ -107,9 +123,11 @@ def is_session_start(message: object) -> bool:
 def error_envelope(error: ProtocolError) -> dict:
     """Build a server-authored error envelope.
 
-    ``code`` and ``field`` are copied only from closed allowlists. Exception
-    text and every client-supplied value are omitted. ``session_already_started``
-    is a connection-lifecycle code; the parser does not raise it.
+    ``code`` and ``field`` are copied only from closed allowlists. The list
+    covers handshake failures and media-frame failures, including ``queue_full``.
+    Exception text and every client-supplied value are omitted.
+    ``session_already_started`` is a connection-lifecycle code; the parser does
+    not raise it. Unknown codes become ``invalid_message`` with a null field.
     """
     code = error.code if isinstance(error.code, str) and error.code in _ERROR_CODES else None
     field = error.field if isinstance(error.field, str) and error.field in _ERROR_FIELDS else None

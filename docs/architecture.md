@@ -7,18 +7,20 @@ Browser / future robot → TransportAdapter → VoiceOrchestrator →
 VoiceProvider and AgentAdapter. DeviceAdapter describes hardware capabilities.
 
 The control plane uses Python asyncio and FastAPI. Current executable scope is a
-local JSON WebSocket with session-owned mock tasks, plus a separate `/ws/avip`
-handshake. VoiceProvider and DeviceAdapter are contracts only; they are not wired
-into a media path. The orchestrator contains no Hermes-specific logic. Agent
-submission returns a run immediately; status and cancellation are capability-gated.
-Future adapters must never block the event loop.
+local JSON WebSocket with session-owned mock tasks, plus `/ws/avip` for the AVIP
+handshake and mock PCM frames. VoiceProvider and DeviceAdapter are contracts
+only. The AVIP path does not call them. The orchestrator contains no
+Hermes-specific logic. Agent submission returns a run immediately; status and
+cancellation are capability-gated. Future adapters must never block the event loop.
 
-`/ws` is the legacy control plane described below. `/ws/avip` only runs the AVIP
-handshake: the connection goes from `session.start` to `session.ready`, or it is
-rejected, and the id is dropped when the socket closes. That path does not
-construct an agent adapter or submit runs. `active_sessions` counts accepted
-sockets on both paths in this process. It is not a durable session table. The
-normative close codes and error envelopes are in the [AVIP draft](protocols/avip-v1.md).
+`/ws` is the legacy control plane described below. `/ws/avip` runs one session
+driver for every device label: `session.start` to `session.ready`, then JSON
+control text and, when audio input was negotiated, binary frames through
+`unpack_frame`. The id and the media queue are dropped when the socket closes.
+That path does not construct an agent adapter or submit runs. `active_sessions`
+counts accepted sockets on both paths in this process. It is not a durable
+session table. The normative close codes and error envelopes are in the
+[AVIP draft](protocols/avip-v1.md).
 
 `ControlSession` owns a receiver, one sequential agent worker, and one writer in
 an asyncio task group. Bounded operation/reply queues keep adapter latency and
@@ -43,12 +45,12 @@ can replace the current session-owned policy.
 
 Client JSON objects: submit(request), status(run_id), cancel_task(run_id), ping,
 stop_playback, cancel_response. Server types: ready, run, pong, stop_playback,
-unsupported, error. There is no microphone implementation, and `/ws` has no
-binary audio path. Malformed messages produce a generic error; runs cannot be
-accessed across sessions. An AVIP `session.start` sent to `/ws` is an unknown
-legacy message. It does not open an AVIP session. AVIP media framing is a
-standalone contract in `avi.protocols.media`; neither `/ws` nor `/ws/avip`
-calls it. `/ws/avip` closes on binary frames.
+unsupported, error. `/ws` still has no binary audio path and no microphone
+implementation. AVIP media framing lives in `avi.protocols.media`. The legacy
+control session does not call it. `/ws/avip` does, for binary messages after a
+ready session with audio input negotiated. An AVIP `session.start` sent to
+`/ws` is an unknown legacy message. It does not open an AVIP session.
+Malformed messages produce a generic error; runs cannot be accessed across sessions.
 
 ## Observability plan
 

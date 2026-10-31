@@ -16,13 +16,12 @@ Define a versioned, device-neutral AVIP contract with media, reliable control,
 asynchronous events, negotiated capabilities and correlation IDs. It realizes the
 client/transport boundary in [ADR-006](006-hexagonal-architecture.md) and preserves
 [ADR-004](004-agent-independence.md)'s capability-gated agent behavior.
-The [AVIP outline](../protocols/avip-v1.md) specifies the session handshake, its
-`/ws/avip` wire rules, and the M0 binary media frame, including sequence,
-timestamp, and bounded-delivery rules. Legacy `/ws` remains a separate protocol
-until an explicit migration. `/ws/avip` implements the initial session handshake
-only; it closes on binary frames and does not run the media queue. Reconnect
-behavior, the remaining control messages, and compatibility with `/ws` are still
-open.
+The [AVIP outline](../protocols/avip-v1.md) specifies the session handshake and
+the M0 binary media frame, including sequence, timestamp, bounded delivery, and
+the wire errors for both. `/ws/avip` serves that handshake and those frames on
+one path. Browser-shaped and headless clients share it. The remaining control
+messages are still open. Legacy `/ws` remains a separate protocol until an
+explicit migration.
 
 ## Alternatives and consequences
 

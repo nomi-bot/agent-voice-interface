@@ -6,16 +6,19 @@ Agreed planning baseline, 2026-10-30. Engineering estimates are provisional, not
 Deliver client/voice/agent ports, shared AVIP v1 proposal, transport abstraction, capability negotiation, session/run state machines and mocked conformance tests.
 **Exit:** browser-shaped and headless Python mock clients connect to same gateway without special-case core logic.
 
-**Implementation progress:** `/ws/avip` serves the session handshake. A valid
-`session.start` returns `session.ready`. Invalid starts, duplicate starts and
-non-text frames return the stable error envelopes in the AVIP draft, then follow
-that draft's close rules. Disconnect drops the connection-scoped session.
-The development gateway advertises no capabilities. Legacy `/ws` is unchanged.
-Transport-independent binary media framing and bounded per-direction delivery
-have shared fixtures; `/ws/avip` does not decode those frames yet.
-The remaining AVIP control and event messages, runnable browser and Python
-client conformance, and the VoiceSession / VoiceResponse / AgentRun state
-machines remain. M0 is not complete.
+**Implementation progress:** `/ws/avip` serves the session handshake and binary
+media frames on one path for every device label. A valid `session.start` returns
+`session.ready`. Invalid starts, duplicate starts, and text that is not JSON
+return the stable error envelopes in the AVIP draft, then follow that draft's
+close rules. After ready, a negotiated `audio_input` session passes each binary
+message through `unpack_frame`. `queue_full` is an error envelope and leaves the
+socket open; other media `ProtocolError`s close it. Disconnect drops the
+connection-scoped session and its queue. The development gateway advertises no
+capabilities unless `AVIP_MOCK_MEDIA=1`, which enables the same PCM mirror for
+every client. Legacy `/ws` is unchanged. Browser-shaped and headless Python mock
+clients pass shared conformance tests on that route. The remaining AVIP control
+and event messages, and the VoiceSession / VoiceResponse / AgentRun state
+machines, remain. M0 is not complete.
 
 ## M1: Real-Time Voice Streaming (5–7 days)
 Verify official Gemini SDK/model and audio/session/tool contracts and pin a tested SDK range; implement Gemini Live provider, browser mic/speaker and binary audio transport, format/resampling/buffering, session/errors and measurement instrumentation.

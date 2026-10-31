@@ -1,9 +1,11 @@
 # AVIP v1 protocol outline
-Status: **Draft — the session handshake is served on `/ws/avip`. Binary media
-framing is a transport-independent contract and is not accepted on that socket.
-The remaining control and event messages, and runnable client conformance, are
-not implemented. `/ws/avip` is not wire-compatible with the legacy `/ws` JSON
-control protocol. M0 is not complete.**
+Status: **Draft — `/ws/avip` serves the session handshake and, once audio
+input is negotiated, binary media frames. The development gateway advertises
+no capabilities unless `AVIP_MOCK_MEDIA=1`, which enables the M0 PCM mirror
+for every client. The remaining control and event messages, and the
+VoiceSession / VoiceResponse / AgentRun state machines, are not implemented.
+`/ws/avip` is not wire-compatible with the legacy `/ws` JSON control protocol.
+M0 is not complete.**
 
 ## Intent
 A device-neutral contract with (1) media frames, (2) control commands, (3) asynchronous events. WebSocket is first transport; future transports must preserve semantics without dictating wire framing.
@@ -43,8 +45,9 @@ in place.
 
 `avi.protocols.avip` validates already-decoded JSON and builds replies. It does
 not open sockets, authenticate clients or connect providers. `AvipSession` is the
-WebSocket driver: it reads one text frame at a time, calls those helpers, and
-discards the session when the socket ends.
+WebSocket driver: it reads one frame at a time, calls those helpers for text,
+passes binary messages to `unpack_frame` after the session is ready, and
+discards the session when the socket ends. Device labels do not select a path.
 
 - `protocol` must be exactly `avip/1`; there is no silent version downgrade.
 - `type` must be `session.start`. This parser handles only the initial handshake.
@@ -68,10 +71,13 @@ discards the session when the socket ends.
   An empty capability set is valid for a control-only client. Gateway defaults
   must remain false until corresponding integrations are enabled. The development
   gateway enables none of them, so `/ws/avip` answers with every capability false.
+  `AVIP_MOCK_MEDIA=1` is the one development exception: it advertises audio input
+  and audio output together, for every client, and still advertises no camera,
+  display, or robot actions.
 - The synthetic [handshake fixtures](../../tests/fixtures/avip-v1-handshake.json)
   negotiate against audio support so browser and headless examples can share one
-  expectation. That availability is test configuration. It is not what `/ws/avip`
-  advertises.
+  expectation. Conformance tests apply that availability on the shared route.
+  It is not the default process configuration.
 
 For example, a gateway that really did support both audio directions would reply:
 
@@ -95,37 +101,39 @@ just sent on this connection.
 {"protocol":"avip/1","type":"error","code":"invalid_message","field":null}
 ```
 
-`code` is `invalid_message`, `unsupported_protocol`, `unsupported_message_type`
-or `session_already_started`. `field`, when present, is one of `protocol`,
-`type`, `request_id`, `session_id`, `device_id` or `capabilities`. Any other
-code or field name is replaced before it is written: unknown codes become
+`code` is `invalid_message`, `unsupported_protocol`, `unsupported_message_type`,
+`session_already_started`, `invalid_frame`, `unsupported_codec`,
+`frame_too_large`, `sequence_anomaly`, `timestamp_regression`, or `queue_full`.
+`field`, when present, is one of `protocol`, `type`, `request_id`, `session_id`,
+`device_id`, `capabilities`, `magic`, `version`, `direction`, `codec`,
+`reserved`, `sequence`, `timestamp_us`, `payload`, or `header`. Any other code
+or field name is replaced before it is written: unknown codes become
 `invalid_message` with a null field. `session_already_started` is raised by the
-connection driver. The parser does not raise it. The shared fixture file lists
+connection driver. The parser does not raise it. The handshake fixture lists
 these envelopes under `wire_errors`.
 
 ### Connection lifecycle
 
-1. After the origin check, the server accepts the socket and waits for one text frame. Silence until the shared session idle limit (currently 300 seconds) closes with code 1001 and reason `Idle timeout`. No session is allocated.
+1. After the origin check, the server accepts the socket and waits for the first frame. Silence until the shared session idle limit (currently 300 seconds) closes with code 1001 and reason `Idle timeout`. No session is allocated. A binary first frame is rejected as in step 7 and is not decoded.
 2. A valid `session.start` allocates a new session id, negotiates capabilities against support the process actually has enabled, and sends `session.ready`. The id is stored only on that connection.
-3. The socket stays ready until it ends. This path has no agent run, voice response or media queue. `active_sessions` counts accepted sockets on `/ws` and `/ws/avip` in this process. It is not a session table.
-4. Disconnect, idle timeout, or a fatal protocol close drops the id. Nothing is written to disk. A later connection starts over with `session_id: null` and receives a new id. The previous id is not a lookup key. Legacy `/ws` mock runs stay on their own sockets and still end when those sockets end. `/ws/avip` does not cancel, persist or resume them.
+3. The socket stays ready until it ends. This path has no agent run and no voice response. It does keep a connection-scoped media queue once the session is ready. `active_sessions` counts accepted sockets on `/ws` and `/ws/avip` in this process. It is not a session table.
+4. Disconnect, idle timeout, or a fatal protocol close drops the id and the queue. Nothing is written to disk. A later connection starts over with `session_id: null` and receives a new id. The previous id is not a lookup key. Legacy `/ws` mock runs stay on their own sockets and still end when those sockets end. `/ws/avip` does not cancel, persist or resume them.
 5. A second JSON object whose `type` is `session.start` is `session_already_started`, whatever the other fields contain. The driver does not parse it as a new session and does not replace the id. It then closes the socket.
 6. Any other failure of the first frame closes the socket. A retry is a new connection.
-7. Text that is not a JSON object is `invalid_message` and closes with code 1002 and reason `Protocol error`. A binary frame is `invalid_message` and closes with code 1003 and reason `Unsupported data`. The bytes are not decoded, stored or forwarded. The binary frame contract below is not called from this path; this close remains until a later slice attaches it.
-8. After ready, a JSON object that is not a session start returns `unsupported_message_type` with `field: type` and the ready session stays up.
-9. A send that exceeds the shared send limit (currently 5 seconds) closes with code 1013 and reason `Send timeout`. The ready or error envelope may not have been delivered. A missing or foreign origin closes with code 1008 and an empty reason, before accept, and produces no AVIP envelope.
+7. Text that is not a JSON object is `invalid_message` and closes with code 1002 and reason `Protocol error`. A binary frame before `session.ready`, or any binary frame when `audio_input` was not negotiated, is `invalid_message` and closes with code 1003 and reason `Unsupported data`. Those bytes are not decoded, stored, or forwarded.
+8. After ready, a JSON object that is not a session start returns `unsupported_message_type` with `field: type` and the ready session stays up. Text is never parsed as a media frame.
+9. A send that exceeds the shared send limit (currently 5 seconds) closes with code 1013 and reason `Send timeout`. That limit covers JSON envelopes and mirrored media frames. The frame may not have been delivered. A missing or foreign origin closes with code 1008 and an empty reason, before accept, and produces no AVIP envelope.
+10. After ready, with `audio_input` negotiated, each binary message is one complete frame passed to `unpack_frame` and then `MediaDelivery.submit` on the uplink queue. Clients may send `audio_uplink` only. An `audio_downlink` frame from the client is `invalid_frame` with `field: direction` and closes with code 1002 and reason `Protocol error`. Other media `ProtocolError`s use the same close, after the error envelope. `queue_full` is the exception: the envelope is sent and the socket stays open. The refused frame does not advance the uplink sequence.
 
 Close reasons are fixed strings. They do not contain client data. There is no replay cursor and no reconnect handshake.
 
 ## Binary media frames
 
 `avi.protocols.media` packs and unpacks one complete audio frame and applies a
-bounded delivery policy. It does not read sockets, attach `session.start`,
-route audio to a provider, or reassemble partial messages. `/ws/avip` still
-closes on binary frames, as the connection lifecycle above describes, and does
-not call `unpack_frame`. One buffer passed to `unpack_frame` is one frame. A
-later adapter can hand it a complete binary message without defining a second
-layout. Text messages stay on the JSON control plane.
+bounded delivery policy. It does not read sockets, route audio to a provider,
+or reassemble partial messages. `/ws/avip` passes each complete binary message
+to `unpack_frame` and leaves text messages on the JSON control plane. One
+buffer is one frame.
 
 The M0 profile is mock PCM, chosen so a browser-shaped client and a headless
 Python client can share fixtures before a provider format is measured. It is
@@ -166,12 +174,11 @@ later frame must be the previous sequence plus one, modulo 2^32
 `sequence_anomaly` and does not advance the stream. There is no resync.
 Timestamps do not wrap; a smaller `uint64` is `timestamp_regression`.
 
-Validation raises the same `ProtocolError` class as the handshake. Media codes
-are `invalid_frame`, `unsupported_protocol`, `unsupported_codec`,
-`frame_too_large`, `sequence_anomaly`, `timestamp_regression`, and `queue_full`.
-The optional `field` is a fixed token such as `magic`, `version`, `payload`, or
-`sequence`. These media codes are not in the `/ws/avip` wire allowlist, so the
-handshake `error_envelope` helper would rewrite them if it were called with one.
+Validation raises the same `ProtocolError` as the handshake. Codes are
+`invalid_frame`, `unsupported_protocol`, `unsupported_codec`, `frame_too_large`,
+`sequence_anomaly`, `timestamp_regression`, and `queue_full`. The optional
+`field` is a fixed token such as `magic`, `version`, `payload`, or `sequence`.
+Those codes and fields are on the `/ws/avip` wire allowlist listed above.
 Buffers larger than 8216 bytes are `frame_too_large` before the header is read.
 Error text does not include client bytes, sequence numbers, or declared lengths.
 A non-zero reserved byte, an unknown direction, a payload that is empty, odd, or
@@ -191,34 +198,68 @@ refused frame keeps its sequence and can be retried unchanged once the consumer
 has taken a frame. Uplink pressure does not consume downlink capacity.
 
 `clear` is an explicit flush. It discards queued frames and does not reset the
-sequence. Overflow never flushes. This queue does not wait, reorder, conceal
-gaps, or close a socket. Jitter buffering is not part of M0: a missing sequence
-is an error, not a concealable loss. Playback delay, drop-oldest under measured
-latency, and mapping `queue_full` onto a WebSocket close remain later work.
-The control plane's existing reply-queue close is a separate limit.
+sequence. Overflow never flushes. This queue does not wait, reorder, or conceal
+gaps. Jitter buffering is not part of M0: a missing sequence is an error, not a
+concealable loss. Playback delay and drop-oldest under measured latency remain
+later work. On the socket, `queue_full` is an error envelope and does not close
+the connection. The control plane's existing reply-queue close is a separate limit.
 
-## Open design decisions
-Settled for the M0 media contract: mock PCM profile, header layout, endianness,
-sequence and timestamp rules, payload bounds, and reject-newest backpressure.
-The `/ws/avip` handshake, its wire error envelopes, duplicate `session.start`,
-and the connection close rules above are also settled. `/ws/avip` still closes
-binary frames with code 1003.
+### Mock mirror
 
-Still open:
+When the negotiated capabilities include `audio_output`, each uplink frame that
+was queued is also mirrored as one `audio_downlink` frame. The gateway assigns
+that frame's sequence, starting at 0, and its timestamp. The timestamp is the
+gateway media clock: it starts at 0 and advances by
+`samples * 1_000_000 // 16000` microseconds, where `samples` is the payload
+length divided by 2. The PCM bytes are copied. This mirror is how a client
+checks framing. It is not a voice provider, and the two clocks must not be
+subtracted.
 
-- Accept these frames on `/ws/avip` instead of closing binary frames, and map
-  media `ProtocolError` codes onto wire envelopes.
-- Run browser-shaped and headless Python clients against one gateway. The
-  shared fixtures do not yet prove a live media connection.
-- Route framed audio through the gateway to a voice provider.
-- Negotiate a measured codec and sample rate in the handshake. Real-time
-  resampling, jitter buffering, and concealment wait on that measurement (M1)
-  and on full-duplex recovery (M3).
+The uplink frame stays in the uplink queue. The mirror does not consume it.
+With no provider attached, the eighth accepted frame fills the queue and the
+next uplink returns `queue_full`. Retrying that same sequence returns
+`queue_full` again. A later sequence is `sequence_anomaly`. `AVIP_MOCK_MEDIA=1`
+turns this mirror on for every client by advertising audio input and audio
+output. The default development gateway advertises neither, so binary frames
+still close with 1003.
+
+## Open design decisions (M0)
+Settled for this slice: mock PCM profile, header layout, endianness, sequence
+and timestamp rules, payload bounds, reject-newest backpressure, socket
+attachment, and wire errors for media failures including `queue_full`. Still open:
+
+- Route framed audio through the gateway to a voice provider. The mirror above does not do that, and it does not drain the uplink queue.
+- Negotiate a measured codec and sample rate in the handshake. Real-time resampling, jitter buffering, and concealment wait on that measurement (M1) and on full-duplex recovery (M3).
 - AuthN/AuthZ of devices and robot actions; when and how remote runs can be reattached. The handshake above does not define that policy.
 - Trace context beyond the media clock defined above, and a way to measure
   cross-host latency without subtracting unsynchronized clocks.
 - Status/progress model for ROS 2 actions and cancellation acknowledgments.
-- VoiceSession, VoiceResponse and AgentRun state machines beyond this connection's start, ready and closed rules.
+- VoiceSession, VoiceResponse and AgentRun state machines beyond this connection's start, ready, media, and closed rules.
+- The remaining control and event messages (`session.end`, `playback.stop`, `response.cancel`, `agent.run.cancel`, transcripts, and run status).
 
 ## Conformance
-Web and Python SDKs must pass shared mock-gateway contract tests. Those runnable clients are not in this slice. M4 validates a headless simulator and minimal ROS 2 bridge. The existing `submit` / `status` / `ping` protocol remains legacy until a deliberate migration; a client cannot assume either socket accepts the other's messages.
+A browser-shaped client and a headless Python client both speak this socket.
+The browser-shaped client sends JSON text and binary frames using the layout in
+[browser-avip-client.js](../../tests/fixtures/browser-avip-client.js). It does
+not call `pack_frame`. The headless client does, via `avi.protocols.media`.
+Shared tests run both against one `/ws/avip` route: handshake, `session.ready`,
+then a media round-trip on the mock mirror. Device id is only a label. M4
+validates a headless simulator and minimal ROS 2 bridge. The existing `submit`
+/ `status` / `ping` protocol remains legacy until a deliberate migration; a
+client cannot assume either socket accepts the other's messages.
+
+Run the suite from a Python 3.12 environment with the project installed:
+
+```sh
+python3.12 -m unittest discover -s tests -v
+python3.12 -m unittest discover -s tests -p test_avip_conformance.py -v
+```
+
+Leave `AVIP_MOCK_MEDIA` unset for that run. The conformance tests enable the
+shared fixture's audio availability themselves. To paste the browser fixture
+into a page on `http://127.0.0.1:8000` and see a mirrored downlink frame, start
+the gateway with the variable set:
+
+```sh
+AVIP_MOCK_MEDIA=1 python3.12 -m uvicorn avi.main:app --host 127.0.0.1 --port 8000 --ws-max-size 16384 --ws-max-queue 16
+```

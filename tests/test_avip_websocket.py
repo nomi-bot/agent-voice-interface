@@ -83,7 +83,17 @@ async def send_frame(incoming, text=None, data=None):
 
 class AvipWebSocketTests(unittest.IsolatedAsyncioTestCase):
     def test_session_ids_are_opaque_and_gateway_capabilities_stay_disabled(self):
+        from avi.main import development_capabilities
         self.assertEqual(AVIP_CAPABILITIES, avip.Capabilities())
+        self.assertEqual(
+            development_capabilities({"AVIP_MOCK_MEDIA": "1"}),
+            avip.Capabilities(audio_input=True, audio_output=True),
+        )
+        for value in ("", "true", "yes", "0"):
+            self.assertEqual(
+                development_capabilities({"AVIP_MOCK_MEDIA": value}),
+                avip.Capabilities(),
+            )
         allocated = {allocate_session_id() for _ in range(32)}
         self.assertEqual(len(allocated), 32)
         for session_id in allocated:
