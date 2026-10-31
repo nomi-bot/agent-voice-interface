@@ -1,5 +1,10 @@
 # Agent Voice Interface (AVI)
 
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+[![Last commit](https://img.shields.io/github/last-commit/nomi-bot/agent-voice-interface)](https://github.com/nomi-bot/agent-voice-interface/commits/main)
+[![Commit activity](https://img.shields.io/github/commit-activity/m/nomi-bot/agent-voice-interface)](https://github.com/nomi-bot/agent-voice-interface/graphs/commit-activity)
+![Status: initialization skeleton](https://img.shields.io/badge/status-initialization_skeleton-yellow.svg)
+
 Give every AI agent and robot a natural voice.
 
 AVI is an open-source, plug-and-play voice interaction layer, independent of
@@ -7,7 +12,7 @@ agent runtimes and model vendors. It is not an agent framework.
 
 ## Current status: initialization skeleton
 
-This first PR supplies a Python 3.12+ FastAPI gateway, four adapter contracts,
+The current implementation supplies a Python 3.12+ FastAPI gateway, four adapter contracts,
 an asynchronous mock agent, a JSON WebSocket control protocol, tests and CI.
 The original Apache-2.0 LICENSE is preserved.
 
@@ -76,9 +81,28 @@ service through a proxy or bind it remotely. Mock requests execute no tools.
 Future agent integrations must retain their own authorisation and approval
 controls. Treat voice transcripts and tool arguments as untrusted input.
 
-See [architecture](docs/architecture.md), [ADRs](docs/adr/) and
-[implementation roadmap](docs/roadmap.md). Gemini SDK/model selection, live
-audio validation and a source-verified Hermes contract are the next milestones.
+## System architecture
+
+![AVI L2 component overview](docs/architecture/avi-l2-overview.png)
+
+Level-2 component overview from accepted ADRs (clients → AVIP media/control/events → Transport → Gateway core → VoiceProvider/AgentAdapter → Gemini Live / Hermes). ROS 2 bridge is client-side; v0.1 mock actions only.
+
+The drawing is the accepted direction beside the initialization skeleton. It does not mean Gemini Live, Hermes, AVIP, or durable runs are implemented. The same map is in the [interactive overview](docs/architecture/avi-l2-architecture.html); [avi-l2-candidate.json](docs/architecture/avi-l2-candidate.json) is the source used to generate it.
+
+## Documentation map
+
+- [Current architecture](docs/architecture.md): executable skeleton behavior and limitations.
+- [Target architecture](docs/architecture/overview.md): accepted device-neutral direction;
+  provider integration, AVIP and durable runs are planned capabilities.
+- [Canonical roadmap](docs/roadmap/milestones.md): M0–M4 scope and required exit gates,
+  including the complete M2 ownership, authorization, persistence and migration gates.
+- [AVIP draft](docs/protocols/avip-v1.md): proposed protocol, separate from the current socket.
+- [ADR index and policy](docs/adr/README.md): one three-digit sequence, 001–010.
+  ADRs 001–005 remain accepted; 006–010 extend them with explicit lineage.
+
+The [legacy roadmap](docs/roadmap.md) redirects to the canonical plan and maps its
+original milestones. v0.1 robotics scope is a simulator and optional ROS 2 bridge
+with mock actions only; no physical actuation.
 
 ## License
 
