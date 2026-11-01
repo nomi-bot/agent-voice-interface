@@ -310,6 +310,27 @@ them. Downlink `audio_downlink` payloads are scheduled on a local speaker
 buffer of at most 8 nominal frames, the same depth as `MediaDelivery`. A
 capture callback that produces more than 8 frames keeps the newest 8.
 
+The uplink also watches `WebSocket.bufferedAmount`. The budget is 8 nominal
+frames including the 24-byte header (5312 bytes). A new frame that would pass
+that budget is not sent, the uplink sequence does not advance, and
+`transmitDrops` counts it. A missing budget, or a queue already twice that
+size, closes the socket and stops capture. That close is local. It does not
+send a cancel. The per-callback trim is not this budget: frames already
+accepted by `send` stay in the browser send queue until the socket drains.
+
+`connect(lease)` must call `lease.adopt(client)` as soon as the WebSocket
+exists, before the handshake. If that function throws afterward, the voice
+session closes the adopted client and stops the microphone. Returning
+`{client, ready}` transfers the same ownership. A connector that opens a
+socket and throws without `adopt` still owns that socket.
+
+AVIP version 1 downlink is 16 kHz. The speaker refuses any other declared
+rate instead of playing those bytes on a 16 kHz buffer. Gemini Live output is
+24 kHz. That rate is not this profile. `resampleS16leToAvip` is the conversion
+a future provider has to run before it packs an AVIP downlink frame. The mock
+mirror is already 16 kHz, and this demo does not perform that provider
+conversion.
+
 `stopPlayback` flushes that local buffer only. It does not write a control
 envelope, does not close the socket, and does not cancel remote agent work.
 The proposed `playback.stop` control message is still not implemented on

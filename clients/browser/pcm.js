@@ -3,9 +3,14 @@
 // Node checks both use it. Frame bytes are handed to avip-client.js packFrame.
 
 export const SAMPLE_RATE_HZ = 16000;
+// Gemini Live's published output rate. It is not the AVIP v1 profile. A
+// provider must resample this to SAMPLE_RATE_HZ before packing a downlink
+// frame. This module does not connect to Gemini.
+export const GEMINI_LIVE_OUTPUT_RATE_HZ = 24000;
 export const FRAME_US = 20000;
 export const FRAME_SAMPLES = SAMPLE_RATE_HZ * FRAME_US / 1_000_000;
 export const FRAME_BYTES = FRAME_SAMPLES * 2;
+export const AVIP_HEADER_BYTES = 24;
 // MediaDelivery keeps at most 8 frames per direction (160 ms at 20 ms).
 export const MAX_BUFFER_FRAMES = 8;
 const INT16_MAX = 32767;
@@ -117,4 +122,21 @@ export class FrameChunker {
     if (!this._converter) this._converter = new RateConverter(this.sampleRate, SAMPLE_RATE_HZ);
     return this._converter.push(samples);
   }
+}
+
+// One-shot conversion onto the AVIP clock. The result is pcm_s16le at
+// 16 kHz. It is not framed and it is not a second wire protocol.
+export function resampleFloat(samples, fromRate, toRate) {
+  if (!Number.isFinite(fromRate) || !Number.isFinite(toRate) || fromRate <= 0 || toRate <= 0) {
+    throw new Error("invalid_sample_rate");
+  }
+  const input = asFloat32(samples);
+  if (fromRate === toRate) return new Float32Array(input);
+  return new RateConverter(fromRate, toRate).push(input);
+}
+
+export function resampleS16leToAvip(payload, sourceRateHz) {
+  const bytes = payload instanceof Uint8Array ? payload : new Uint8Array(payload);
+  if (sourceRateHz === SAMPLE_RATE_HZ) return new Uint8Array(bytes);
+  return floatToS16le(resampleFloat(s16leToFloat(bytes), sourceRateHz, SAMPLE_RATE_HZ));
 }

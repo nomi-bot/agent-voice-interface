@@ -9,8 +9,11 @@
 
 import {AUDIO_DOWNLINK} from "./avip-client.js";
 import {
+  AVIP_HEADER_BYTES,
+  FRAME_BYTES,
   FRAME_SAMPLES,
   FrameChunker,
+  GEMINI_LIVE_OUTPUT_RATE_HZ,
   MAX_BUFFER_FRAMES,
   SAMPLE_RATE_HZ,
   s16leToFloat,
@@ -26,6 +29,14 @@ export const VOICE_METRICS = [
 export const DEVELOPMENT_ORIGINS = ["http://127.0.0.1:8000", "http://localhost:8000"];
 export const CAPTURE_WORKLET_URL = "/voice/capture-worklet.js";
 export const PLAYBACK_GAIN = 0.6;
+// One nominal uplink frame on the wire, header included. The browser
+// WebSocket queues this many bytes in bufferedAmount, not the PCM alone.
+export const UPLINK_FRAME_BYTES = AVIP_HEADER_BYTES + FRAME_BYTES;
+// Same depth as MediaDelivery: 8 nominal frames. Past this, new uplink PCM
+// is dropped and the sequence does not advance.
+export const MAX_UPLINK_QUEUED_BYTES = MAX_BUFFER_FRAMES * UPLINK_FRAME_BYTES;
+// A queue already twice that deep is not a live mic anymore. Close it.
+export const UPLINK_CLOSE_QUEUED_BYTES = MAX_UPLINK_QUEUED_BYTES * 2;
 const NOMINAL_FRAME_SEC = FRAME_SAMPLES / SAMPLE_RATE_HZ;
 const SECURE_HOSTS = new Set(["localhost", "127.0.0.1", "::1", "[::1]"]);
 
@@ -43,6 +54,38 @@ export function voiceError(code, message) {
   const error = new Error(message);
   error.code = code;
   return error;
+}
+
+// "send" queues one frame. "drop" skips it and leaves the uplink sequence
+// where it is. "close" means the socket has no usable byte budget.
+export function uplinkQueueDecision(bufferedAmount, frameBytes = UPLINK_FRAME_BYTES) {
+  if (typeof bufferedAmount !== "number" || !Number.isFinite(bufferedAmount) || bufferedAmount < 0) {
+    return "close";
+  }
+  if (bufferedAmount >= UPLINK_CLOSE_QUEUED_BYTES) return "close";
+  if (bufferedAmount + frameBytes > MAX_UPLINK_QUEUED_BYTES) return "drop";
+  return "send";
+}
+
+// AVIP version 1 downlink is 16 kHz. Passing any other rate throws instead of
+// scheduling those bytes on a 16 kHz buffer. Gemini Live output is 24 kHz and
+// has to go through resampleS16leToAvip before it is an AVIP payload.
+export function playbackSchedule(payload, sourceRateHz) {
+  if (sourceRateHz !== SAMPLE_RATE_HZ) {
+    throw voiceError(
+      "sample_rate_mismatch",
+      `Refusing to play ${sourceRateHz} Hz PCM as AVIP ${SAMPLE_RATE_HZ} Hz. ` +
+      `Gemini Live output is ${GEMINI_LIVE_OUTPUT_RATE_HZ} Hz and must be resampled to ` +
+      `${SAMPLE_RATE_HZ} Hz before it is packed as an AVIP downlink frame.`,
+    );
+  }
+  const bytes = payload instanceof Uint8Array ? payload : new Uint8Array(payload);
+  if (bytes.length % 2 !== 0) throw voiceError("sample_rate_mismatch", "AVIP playback expects pcm_s16le bytes.");
+  return {
+    sampleRateHz: SAMPLE_RATE_HZ,
+    durationSec: (bytes.length / 2) / SAMPLE_RATE_HZ,
+    payload: bytes,
+  };
 }
 
 export function pageOrigin(page) {
@@ -218,8 +261,9 @@ export function createBrowserAudio() {
       const speaker = new SpeakerBuffer({
         now: () => ctx.currentTime,
         play(payload, when) {
-          const floats = s16leToFloat(payload);
-          const buffer = ctx.createBuffer(1, floats.length, SAMPLE_RATE_HZ);
+          const scheduled = playbackSchedule(payload, SAMPLE_RATE_HZ);
+          const floats = s16leToFloat(scheduled.payload);
+          const buffer = ctx.createBuffer(1, floats.length, scheduled.sampleRateHz);
           copyToBuffer(buffer, floats);
           const node = ctx.createBufferSource();
           node.buffer = buffer;
@@ -272,6 +316,7 @@ export class BrowserVoice {
     onStats = () => {},
     media = browserMedia(),
     audio = createBrowserAudio(),
+    downlinkRateHz = SAMPLE_RATE_HZ,
   } = {}) {
     this.now = now;
     this.onMetric = onMetric;
@@ -279,6 +324,7 @@ export class BrowserVoice {
     this.onStats = onStats;
     this.media = media;
     this.audio = audio;
+    this.downlinkRateHz = downlinkRateHz;
     this.metrics = {};
     this.stats = {
       uplinkFrames: 0,
@@ -286,6 +332,7 @@ export class BrowserVoice {
       playbackFrames: 0,
       captureDrops: 0,
       playbackDrops: 0,
+      transmitDrops: 0,
     };
     this.client = null;
     this.stream = null;
@@ -331,13 +378,42 @@ export class BrowserVoice {
     this.speaker = null;
     await this.audio.close();
     if (status) this.onStatus(status, detail || {});
-    const client = this.client;
-    if (client && client.state !== "closed" && typeof client.close === "function") client.close();
+    this._closeClient();
   }
 
-  // `connect` returns `{client, ready}` for an AVIP session that is already
-  // started. The microphone is acquired before `connect` so a refused
-  // permission never opens a socket.
+  _adopt(client) {
+    if (!client || typeof client.close !== "function") {
+      throw voiceError("invalid_state", "A voice client must have close().");
+    }
+    if (this.client && this.client !== client) {
+      try {
+        this.client.close();
+      } catch {
+        // The previous client is already closing.
+      }
+    }
+    this.client = client;
+  }
+
+  _closeClient() {
+    const client = this.client;
+    if (!client || client.state === "closed" || typeof client.close !== "function") return;
+    try {
+      client.close();
+    } catch {
+      // The socket is already closing.
+    }
+  }
+
+  // `connect(lease)` owns the socket from the moment it can fail.
+  // Call `lease.adopt(client)` as soon as the WebSocket exists, before
+  // handshake or capability checks. BrowserVoice then closes that client if
+  // `connect` throws or negotiation fails, and it stops the microphone.
+  // Returning `{client, ready}` also transfers ownership. A connector that
+  // opens a socket and throws without adopt leaves a socket this object
+  // cannot see.
+  // The microphone is acquired before `connect` so a refused permission
+  // never opens a socket.
   async start({connect} = {}) {
     if (this.running || this._shutdownDone) throw voiceError("invalid_state", "Voice session already started.");
     if (typeof connect !== "function") throw voiceError("invalid_state", "connect is required.");
@@ -386,9 +462,11 @@ export class BrowserVoice {
     this.captureLive = true;
     this._mark("capture-start");
     this.onStatus("connecting", {});
+    const lease = {adopt: (client) => this._adopt(client)};
     try {
-      const opened = await connect();
-      this.client = opened.client;
+      const opened = await connect(lease);
+      if (opened && opened.client) this._adopt(opened.client);
+      if (!this.client) throw voiceError("invalid_state", "connect returned no client");
       if (!this.captureLive) {
         throw voiceError("device_ended", "The microphone ended before the session was ready.");
       }
@@ -411,8 +489,7 @@ export class BrowserVoice {
       this.captureLive = false;
       this._releaseStream();
       await this.audio.close();
-      const client = this.client;
-      if (client && client.state !== "closed" && typeof client.close === "function") client.close();
+      this._closeClient();
       if (error && error.code === "audio_unavailable") {
         this.onStatus("audio-unavailable", {message: error.message});
       } else if (error && error.code === "device_ended") {
@@ -436,6 +513,12 @@ export class BrowserVoice {
     });
   }
 
+  _bufferedAmount() {
+    const socket = this.client && this.client.socket;
+    if (!socket) return null;
+    return socket.bufferedAmount;
+  }
+
   _onSamples(samples, sampleRate) {
     if (!this.captureLive || !this.client || this.client.state === "closed") return;
     let frames;
@@ -450,28 +533,54 @@ export class BrowserVoice {
       this.stats.captureDrops += overflow;
       frames = frames.slice(overflow);
     }
-    for (const payload of frames) {
-      if (!this.captureLive || this.client.state === "closed") return;
-      try {
-        this.client.sendUplink(payload);
-      } catch (error) {
-        void this._shutdown("disconnected", {message: error.message}).catch(() => {});
-        return;
+    let sent = 0;
+    let dropped = 0;
+    for (let index = 0; index < frames.length; index += 1) {
+      const payload = frames[index];
+      if (!this.captureLive || this.client.state === "closed") break;
+      const decision = uplinkQueueDecision(this._bufferedAmount(), AVIP_HEADER_BYTES + payload.length);
+      if (decision === "send") {
+        try {
+          this.client.sendUplink(payload);
+        } catch (error) {
+          void this._shutdown("disconnected", {message: error.message}).catch(() => {});
+          return;
+        }
+        this.stats.uplinkFrames += 1;
+        this._mark("first-uplink");
+        sent += 1;
+        continue;
       }
-      this.stats.uplinkFrames += 1;
-      this._mark("first-uplink");
+      const unused = frames.length - index;
+      this.stats.transmitDrops += unused;
+      dropped += unused;
+      if (decision === "close") {
+        void this._shutdown("uplink-stalled", {
+          message: "The uplink send queue stopped draining. Capture stopped and the session was closed. No cancel was sent.",
+        }).catch(() => {});
+      }
+      break;
     }
-    if (frames.length) this.onStats(this.stats);
+    if (sent || dropped) this.onStats(this.stats);
   }
 
   _onDownlink(payload) {
     this.stats.downlinkFrames += 1;
     this._mark("first-downlink");
+    let scheduled;
+    try {
+      scheduled = playbackSchedule(payload, this.downlinkRateHz);
+    } catch (error) {
+      this.stats.playbackDrops += 1;
+      this.onStatus("playback-failed", {message: error.message});
+      this.onStats(this.stats);
+      return;
+    }
     if (this.playbackHalted || !this.speaker) {
       this.onStats(this.stats);
       return;
     }
-    const played = this.speaker.enqueue(payload);
+    const played = this.speaker.enqueue(scheduled.payload);
     if (played) {
       this.stats.playbackFrames += 1;
       this._mark("playback-start");

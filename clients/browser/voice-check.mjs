@@ -5,13 +5,18 @@ import {readFileSync} from "node:fs";
 import assert from "node:assert/strict";
 
 import {AUDIO_DOWNLINK, AUDIO_UPLINK, AvipBrowserClient, packFrame, unpackFrame} from "./avip-client.js";
-import {FrameChunker, floatToS16le, s16leToFloat} from "./pcm.js";
+import {FrameChunker, GEMINI_LIVE_OUTPUT_RATE_HZ, floatToS16le, resampleS16leToAvip, s16leToFloat} from "./pcm.js";
 import {
   BrowserVoice,
+  MAX_UPLINK_QUEUED_BYTES,
   SpeakerBuffer,
+  UPLINK_CLOSE_QUEUED_BYTES,
+  UPLINK_FRAME_BYTES,
   developmentGatewayOrigin,
   pageOrigin,
+  playbackSchedule,
   secureContext,
+  uplinkQueueDecision,
 } from "./voice.js";
 
 const SILENCE = new Uint8Array(640);
@@ -104,6 +109,7 @@ function liveClient() {
   const writes = [];
   client.socket = {
     readyState: 1,
+    bufferedAmount: 0,
     send(data) {
       writes.push(data);
     },
@@ -144,10 +150,12 @@ function boot(options = {}) {
     },
     media,
     audio,
+    downlinkRateHz: options.downlinkRateHz,
   });
   const ctx = {voice, client, audio, media, statuses, metrics, clock, connects: 0};
   ctx.start = voice.start({
-    connect: async () => {
+    connect: async (lease) => {
+      if (options.connect) return options.connect(lease, ctx);
       ctx.connects += 1;
       if (options.beforeReady) await options.beforeReady(ctx);
       return {client, ready: {capabilities: readyCapabilities(options.capabilities)}};
@@ -600,6 +608,141 @@ await check("robot-actions-are-refused", async () => {
     assert.equal(ctx.client.state, "closed");
     assert.equal(ctx.client.writes.length, 0);
     assert.equal(ctx.media.created[0].stopped, true);
+  } finally {
+    await ctx.voice.stop();
+  }
+});
+
+await check("uplink-queue-decision-matches-the-byte-budget", async () => {
+  assert.equal(UPLINK_FRAME_BYTES, 664);
+  assert.equal(uplinkQueueDecision(0), "send");
+  assert.equal(uplinkQueueDecision(MAX_UPLINK_QUEUED_BYTES - UPLINK_FRAME_BYTES), "send");
+  assert.equal(uplinkQueueDecision(MAX_UPLINK_QUEUED_BYTES - UPLINK_FRAME_BYTES + 1), "drop");
+  assert.equal(uplinkQueueDecision(MAX_UPLINK_QUEUED_BYTES), "drop");
+  assert.equal(uplinkQueueDecision(UPLINK_CLOSE_QUEUED_BYTES), "close");
+  assert.equal(uplinkQueueDecision(undefined), "close");
+  assert.equal(uplinkQueueDecision(-1), "close");
+});
+
+await check("uplink-budget-drops-on-a-non-draining-socket", async () => {
+  const client = liveClient();
+  client.socket.send = function send(data) {
+    client.writes.push(data);
+    this.bufferedAmount += data.byteLength;
+  };
+  const ctx = boot({client});
+  try {
+    await ctx.start;
+    ctx.audio.samples(new Float32Array(16 * 320), 16000);
+    assert.equal(ctx.voice.stats.captureDrops, 8);
+    assert.equal(client.writes.length, 8);
+    assert.equal(client.writes[0].byteLength, UPLINK_FRAME_BYTES);
+    assert.equal(client.socket.bufferedAmount, MAX_UPLINK_QUEUED_BYTES);
+    assert.equal(client.sequence, 8);
+    assert.equal(ctx.voice.stats.transmitDrops, 0);
+    assert.equal(ctx.voice.stats.uplinkFrames, 8);
+    ctx.audio.samples(new Float32Array(320 * 3), 16000);
+    assert.equal(client.writes.length, 8);
+    assert.equal(client.sequence, 8);
+    assert.equal(ctx.voice.stats.transmitDrops, 3);
+    assert.equal(ctx.voice.stats.uplinkFrames, 8);
+    assert.equal(client.state, "open");
+    assert.equal(ctx.media.created[0].stopped, false);
+  } finally {
+    await ctx.voice.stop();
+  }
+});
+
+await check("uplink-budget-closes-when-the-queue-has-no-bound", async () => {
+  const client = liveClient();
+  delete client.socket.bufferedAmount;
+  const ctx = boot({client});
+  try {
+    await ctx.start;
+    ctx.audio.samples(new Float32Array(320), 16000);
+    await flush();
+    assert.equal(client.writes.length, 0);
+    assert.equal(client.sequence, 0);
+    assert.equal(client.state, "closed");
+    assert.equal(ctx.media.created[0].stopped, true);
+    assert.ok(names(ctx.statuses).includes("uplink-stalled"));
+    assert.equal(ctx.voice.stats.transmitDrops, 1);
+  } finally {
+    await ctx.voice.stop();
+  }
+});
+
+await check("uplink-budget-closes-at-the-hard-cap", async () => {
+  const client = liveClient();
+  client.socket.bufferedAmount = UPLINK_CLOSE_QUEUED_BYTES;
+  const ctx = boot({client});
+  try {
+    await ctx.start;
+    ctx.audio.samples(new Float32Array(320), 16000);
+    await flush();
+    assert.equal(client.writes.length, 0);
+    assert.equal(client.state, "closed");
+    assert.equal(ctx.media.created[0].stopped, true);
+    assert.equal(client.socket.readyState, 3);
+  } finally {
+    await ctx.voice.stop();
+  }
+});
+
+await check("handshake-failure-closes-the-adopted-socket", async () => {
+  const client = liveClient();
+  let closes = 0;
+  const realClose = client.close.bind(client);
+  client.close = () => {
+    closes += 1;
+    realClose();
+  };
+  const ctx = boot({
+    client,
+    connect: async (lease) => {
+      lease.adopt(client);
+      throw Object.assign(new Error("handshake failed"), {code: "handshake_failed"});
+    },
+  });
+  try {
+    await assert.rejects(ctx.start, (error) => error.code === "handshake_failed");
+    assert.equal(closes, 1);
+    assert.equal(client.state, "closed");
+    assert.equal(client.socket.readyState, 3);
+    assert.equal(ctx.media.created[0].stopped, true);
+    assert.equal(ctx.audio.closed, 1);
+    assert.equal(client.writes.length, 0);
+  } finally {
+    await ctx.voice.stop();
+  }
+});
+
+await check("gemini-24k-pcm-is-not-played-as-avip-16k", async () => {
+  const oneSecond = floatToS16le(new Float32Array(GEMINI_LIVE_OUTPUT_RATE_HZ).fill(0.25));
+  assert.equal(oneSecond.length / 2 / 16000, 1.5);
+  assert.throws(() => playbackSchedule(oneSecond, GEMINI_LIVE_OUTPUT_RATE_HZ), (error) => {
+    assert.equal(error.code, "sample_rate_mismatch");
+    assert.match(error.message, /24000/);
+    assert.match(error.message, /16000/);
+    return true;
+  });
+  const avip = resampleS16leToAvip(oneSecond, GEMINI_LIVE_OUTPUT_RATE_HZ);
+  assert.equal(avip.length / 2, 16000);
+  const scheduled = playbackSchedule(avip, 16000);
+  assert.equal(scheduled.sampleRateHz, 16000);
+  assert.equal(scheduled.durationSec, 1);
+  assert.ok(s16leToFloat(avip).every((value) => Math.abs(value - 0.25) < 0.002));
+  const ctx = boot({downlinkRateHz: GEMINI_LIVE_OUTPUT_RATE_HZ});
+  try {
+    await ctx.start;
+    pushDownlink(ctx.client, oneSecond.slice(0, 640));
+    await flush();
+    assert.equal(ctx.audio.played.length, 0);
+    assert.equal(ctx.voice.stats.playbackFrames, 0);
+    assert.equal(ctx.voice.stats.playbackDrops, 1);
+    assert.equal(ctx.voice.metrics["playback-start"], undefined);
+    assert.ok(names(ctx.statuses).includes("playback-failed"));
+    assert.equal(ctx.client.state, "open");
   } finally {
     await ctx.voice.stop();
   }

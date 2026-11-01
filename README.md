@@ -170,9 +170,13 @@ closes the socket.
 To hear the microphone come back through the speakers, start the gateway with
 the mock mirror enabled and open the voice page on that same origin. Use
 headphones. The page asks for microphone permission, sends 20 ms PCM uplink
-frames, and plays the mirrored downlink. **Stop playback** flushes only the
+frames, and plays the mirrored 16 kHz downlink. Gemini Live’s 24 kHz output is
+not this profile and is not played as 16 kHz. **Stop playback** flushes only the
 local speaker. It does not send a control message and it does not close the
-session.
+session. If the WebSocket send queue reaches 8 unsent nominal frames, later
+microphone frames are dropped and counted. A queue with no byte budget closes
+the socket and releases the microphone. The page adopts the socket before the
+handshake, so a failed handshake closes it too.
 
 ```sh
 AVIP_MOCK_MEDIA=1 python3.12 -m uvicorn avi.main:app --host 127.0.0.1 --port 8000 --ws-max-size 16384 --ws-max-queue 16

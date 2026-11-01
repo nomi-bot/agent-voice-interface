@@ -46,7 +46,7 @@
 <body>
   <main>
     <h1>AVI browser voice</h1>
-    <p>Microphone capture and speaker playback for the local AVIP gateway. This page uses the existing <code>pcm_s16le</code> frames. It is not a voice model, and it does not run an agent.</p>
+    <p>Microphone capture and speaker playback for the local AVIP gateway. This page uses the existing 16 kHz <code>pcm_s16le</code> frames. It plays that mock profile only. Gemini Live’s 24 kHz output is a provider rate and is not played as 16 kHz. This page is not a voice model, and it does not run an agent.</p>
 
     <div id="origin" class="panel"></div>
 
@@ -71,6 +71,7 @@
       <dt>Downlink frames</dt><dd id="downlink">0</dd>
       <dt>Played frames</dt><dd id="played">0</dd>
       <dt>Capture drops</dt><dd id="capture-drops">0</dd>
+      <dt>Transmit drops</dt><dd id="transmit-drops">0</dd>
       <dt>Playback drops</dt><dd id="playback-drops">0</dd>
     </dl>
 
@@ -125,6 +126,7 @@
       document.querySelector("#downlink").textContent = stats ? String(stats.downlinkFrames) : "0";
       document.querySelector("#played").textContent = stats ? String(stats.playbackFrames) : "0";
       document.querySelector("#capture-drops").textContent = stats ? String(stats.captureDrops) : "0";
+      document.querySelector("#transmit-drops").textContent = stats ? String(stats.transmitDrops) : "0";
       document.querySelector("#playback-drops").textContent = stats ? String(stats.playbackDrops) : "0";
       const base = voice && voice.metrics["capture-start"];
       const rows = VOICE_METRICS.map((name) => {
@@ -157,6 +159,7 @@
       "audio-unavailable",
       "capture-failed",
       "playback-failed",
+      "uplink-stalled",
     ]);
 
     function resetButtons() {
@@ -173,13 +176,15 @@
         onStatus(name, detail) {
           setStatus(describe(name, detail), warnings.has(name));
           render();
-          if (name === "disconnected" || name === "ended" || name === "audio-unavailable") resetButtons();
+          if (name === "disconnected" || name === "ended" || name === "audio-unavailable" || name === "uplink-stalled") {
+            resetButtons();
+          }
         },
       });
       voice = session;
       try {
         await session.start({
-          connect: async () => {
+          connect: async (lease) => {
             const suffix = globalThis.crypto && crypto.randomUUID ? crypto.randomUUID() : String(Date.now());
             const client = new AvipBrowserClient({
               url: `ws://${location.host}/ws/avip`,
@@ -193,14 +198,12 @@
                 robot_actions: false,
               },
             });
-            try {
-              await client.connect();
-              const ready = await client.start();
-              return {client, ready};
-            } catch (error) {
-              client.close();
-              throw error;
-            }
+            // Ownership moves here, before the handshake. A later throw is
+            // closed by BrowserVoice, along with the microphone.
+            lease.adopt(client);
+            await client.connect();
+            const ready = await client.start();
+            return {client, ready};
           },
         });
         stopPlaybackButton.disabled = false;
