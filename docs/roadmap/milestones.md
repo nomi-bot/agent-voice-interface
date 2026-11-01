@@ -11,9 +11,12 @@ media frames on one path for every device label. A valid `session.start` returns
 `session.ready`. Invalid starts, duplicate starts, and text that is not JSON
 return the stable error envelopes in the AVIP draft, then follow that draft's
 close rules. After ready, a negotiated `audio_input` session passes each binary
-message through `unpack_frame`. `queue_full` is an error envelope and leaves the
-socket open; other media `ProtocolError`s close it. Disconnect drops the
-connection-scoped session and its queue. The development gateway advertises no
+message through `unpack_frame`. A mock sink drains accepted uplink frames for
+the life of the socket, so a nominal 20 ms stream is not permanently stuck at
+the depth cap. `queue_full` is an error envelope and leaves the socket open
+when that sink is not taking; other media `ProtocolError`s close it.
+Disconnect cancels the sink and drops the connection-scoped session and its
+queue. The development gateway advertises no
 capabilities unless `AVIP_MOCK_MEDIA=1`, which enables the same PCM mirror for
 every client. Legacy `/ws` is unchanged. Browser-shaped and headless Python mock
 clients pass shared conformance tests on that route. VoiceSession,

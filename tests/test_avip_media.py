@@ -1,3 +1,4 @@
+import asyncio
 import json
 from pathlib import Path
 import struct
@@ -377,6 +378,181 @@ class BoundedDeliveryTests(unittest.TestCase):
                     delivery.take(invalid)
                 self.assertEqual(caught.exception.field, "direction")
                 self.assertNotIn(str(invalid), str(caught.exception))
+
+
+class MockMediaSinkTests(unittest.IsolatedAsyncioTestCase):
+    def _payload(self):
+        # Even length, and not a value the sink stores as an integer.
+        unit = _DISTINCTIVE + b"\x00"
+        repeats = media.NOMINAL_PAYLOAD_BYTES // len(unit)
+        return unit * repeats
+
+    async def test_drains_thirty_seconds_of_nominal_frames(self):
+        frames = 30 * 1_000_000 // media.NOMINAL_CHUNK_US
+        self.assertEqual(frames, 1500)
+        self.assertEqual(frames * media.NOMINAL_CHUNK_US, 30_000_000)
+        payload = self._payload()
+        self.assertEqual(len(payload), media.NOMINAL_PAYLOAD_BYTES)
+        delivery = media.MediaDelivery()
+        sink = media.MockMediaSink(delivery)
+        sink.start()
+        try:
+            self.assertIn(sink, media.active_mock_sinks())
+            for sequence in range(frames):
+                delivery.submit(_frame(
+                    sequence=sequence,
+                    timestamp_us=sequence * media.NOMINAL_CHUNK_US,
+                    payload=payload,
+                ))
+                sink.reclaim()
+                self.assertEqual(delivery.depth(media.Direction.AUDIO_UPLINK), 0)
+            self.assertEqual(sink.consumed, frames)
+            self.assertEqual(sink.consumed_bytes, frames * len(payload))
+            self.assertEqual(sink.last_sequence, frames - 1)
+            self.assertEqual(sink.pending, 0)
+            self.assertNotIn("SECRET", repr(sink))
+            for value in vars(sink).values():
+                self.assertNotIsInstance(value, (bytes, bytearray, memoryview))
+        finally:
+            await sink.stop()
+        self.assertEqual(media.active_mock_sinks(), frozenset())
+        self.assertEqual(self._tasks(), [])
+
+    async def test_pause_and_allow_keep_reject_newest_until_the_sink_takes(self):
+        delivery = media.MediaDelivery()
+        sink = media.MockMediaSink(delivery)
+        sink.start()
+        try:
+            sink.pause()
+            for sequence in range(media.MAX_QUEUE_DEPTH):
+                delivery.submit(_frame(sequence=sequence, timestamp_us=sequence))
+                sink.reclaim()
+            self.assertEqual(sink.consumed, 0)
+            with self.assertRaises(media.ProtocolError) as caught:
+                delivery.submit(_frame(
+                    sequence=media.MAX_QUEUE_DEPTH, timestamp_us=media.MAX_QUEUE_DEPTH
+                ))
+            self.assertEqual(caught.exception.code, "queue_full")
+            refused = _frame(
+                sequence=media.MAX_QUEUE_DEPTH, timestamp_us=media.MAX_QUEUE_DEPTH
+            )
+            with self.assertRaises(media.ProtocolError) as caught:
+                delivery.submit(refused)
+            self.assertEqual(caught.exception.code, "queue_full")
+            sink.allow(1)
+            self.assertEqual(sink.consumed, 1)
+            self.assertEqual(sink.pending, media.MAX_QUEUE_DEPTH - 1)
+            delivery.submit(refused)
+            self.assertEqual(delivery.depth(media.Direction.AUDIO_UPLINK), media.MAX_QUEUE_DEPTH)
+            with self.assertRaises(media.ProtocolError) as caught:
+                delivery.submit(_frame(
+                    sequence=media.MAX_QUEUE_DEPTH + 1,
+                    timestamp_us=media.MAX_QUEUE_DEPTH + 1,
+                ))
+            self.assertEqual(caught.exception.code, "queue_full")
+            sink.resume()
+            self.assertEqual(sink.pending, 0)
+            self.assertEqual(sink.consumed, media.MAX_QUEUE_DEPTH + 1)
+            delivery.submit(_frame(
+                sequence=media.MAX_QUEUE_DEPTH + 1,
+                timestamp_us=media.MAX_QUEUE_DEPTH + 1,
+            ))
+            sink.reclaim()
+            self.assertEqual(sink.consumed, media.MAX_QUEUE_DEPTH + 2)
+            self.assertEqual(sink.last_sequence, media.MAX_QUEUE_DEPTH + 1)
+        finally:
+            await sink.stop()
+
+    async def test_stop_cancels_the_task_and_a_second_stop_is_safe(self):
+        delivery = media.MediaDelivery()
+        downlink = _frame(media.Direction.AUDIO_DOWNLINK, payload=b"\x02\x00")
+        sink = media.MockMediaSink(delivery)
+        sink.pause()
+        sink.start()
+        delivery.submit(_frame(payload=_DISTINCTIVE + b"\x00"))
+        delivery.submit(downlink)
+        sink.reclaim()
+        self.assertEqual(sink.pending, 1)
+        self.assertEqual(delivery.depth(media.Direction.AUDIO_DOWNLINK), 1)
+        self.assertEqual(len(self._tasks()), 1)
+        await sink.stop()
+        self.assertFalse(sink.running)
+        self.assertEqual(sink.pending, 0)
+        self.assertEqual(sink.consumed, 0)
+        self.assertEqual(delivery.depth(media.Direction.AUDIO_DOWNLINK), 1)
+        self.assertEqual(media.active_mock_sinks(), frozenset())
+        self.assertEqual(self._tasks(), [])
+        await sink.stop()
+        self.assertNotIn("SECRET", repr(sink))
+        for value in vars(sink).values():
+            self.assertNotIsInstance(value, (bytes, bytearray, memoryview))
+
+    async def test_sink_ignores_downlink_and_rejects_a_second_start(self):
+        delivery = media.MediaDelivery()
+        sink = media.MockMediaSink(delivery)
+        sink.start()
+        try:
+            delivery.submit(_frame(media.Direction.AUDIO_DOWNLINK, payload=b"\x02\x00"))
+            delivery.submit(_frame(payload=b"\x01\x00"))
+            sink.reclaim()
+            self.assertEqual(sink.consumed, 1)
+            self.assertEqual(delivery.depth(media.Direction.AUDIO_DOWNLINK), 1)
+            with self.assertRaises(RuntimeError):
+                sink.start()
+        finally:
+            await sink.stop()
+        self.assertEqual(delivery.depth(media.Direction.AUDIO_DOWNLINK), 1)
+
+    async def test_consumer_task_takes_queued_frames_without_polling(self):
+        delivery = media.MediaDelivery()
+        sink = media.MockMediaSink(delivery)
+        sink.start()
+        try:
+            for sequence in range(media.MAX_QUEUE_DEPTH):
+                delivery.submit(_frame(sequence=sequence, timestamp_us=sequence))
+            await asyncio.wait_for(sink.wait_consumed(media.MAX_QUEUE_DEPTH), 1)
+            self.assertEqual(sink.pending, 0)
+            self.assertEqual(sink.last_sequence, media.MAX_QUEUE_DEPTH - 1)
+        finally:
+            await sink.stop()
+        self.assertEqual(self._tasks(), [])
+
+    async def test_allow_rejects_non_positive_counts_without_echoing_them(self):
+        sink = media.MockMediaSink(media.MediaDelivery())
+        for count in (0, -1, True, None, 1.5):
+            with self.subTest(count=count):
+                with self.assertRaises(ValueError) as caught:
+                    sink.allow(count)
+                self.assertEqual(str(caught.exception), "count must be a positive integer")
+                self.assertNotIn(repr(count), str(caught.exception))
+
+    async def test_wait_for_observes_a_frame_queued_later(self):
+        delivery = media.MediaDelivery()
+        delivery.submit(_frame())
+        await delivery.wait_for(media.Direction.AUDIO_UPLINK)
+        self.assertIsNotNone(delivery.take(media.Direction.AUDIO_UPLINK))
+
+        async def submit_later():
+            await asyncio.sleep(0.01)
+            delivery.submit(_frame(sequence=1, timestamp_us=1))
+
+        producer = asyncio.create_task(submit_later())
+        await delivery.wait_for(media.Direction.AUDIO_UPLINK)
+        await producer
+        self.assertEqual(delivery.depth(media.Direction.AUDIO_UPLINK), 1)
+        with self.assertRaises(media.ProtocolError) as caught:
+            await delivery.wait_for("audio_uplink")
+        self.assertEqual(caught.exception.field, "direction")
+
+    def test_sink_requires_a_delivery_queue(self):
+        with self.assertRaises(TypeError):
+            media.MockMediaSink(object())
+
+    def _tasks(self):
+        return [
+            task for task in asyncio.all_tasks()
+            if task.get_name() == media.MockMediaSink.TASK_NAME
+        ]
 
 
 if __name__ == "__main__":
