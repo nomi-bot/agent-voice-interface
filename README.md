@@ -29,8 +29,11 @@ closes, the session id and its media queue are gone. The development gateway
 advertises no audio, camera, display, or robot capability unless
 `AVIP_MOCK_MEDIA=1`, which enables the same PCM mirror for every client. `/ws`
 still uses the legacy control protocol below. Browser-shaped and headless Python
-mock clients share `/ws/avip` in the conformance tests. The remaining control
-messages and the voice/agent state machines are still ahead, so M0 is not complete.
+mock clients share `/ws/avip` in the conformance tests. VoiceSession,
+VoiceResponse and AgentRun transitions are implemented in core. `/ws/avip`
+records connecting, active and closed for that socket and still does not
+drive reconnect, voice responses or agent runs. The remaining control
+messages are still ahead, so M0 is not complete.
 
 ## Local development (macOS / Mac Mini)
 

@@ -15,6 +15,10 @@ work with no durable owner, authorization or recovery path.
 
 Separate VoiceSession, VoiceResponse and AgentRun. Playback stop, provider-response
 cancellation and explicit agent-run cancellation remain distinct operations.
+The state enums and allowed transitions are implemented in `avi.core.lifecycle`
+and specified in the [lifecycle guide](../architecture/session-lifecycle.md).
+That module does not add ownership, persistence, or disconnect immunity for the
+legacy `/ws` mock.
 [ADR-004](004-agent-independence.md) stays accepted: Hermes details remain in its
 adapter, with source-verified contracts and truthful status/cancel capabilities.
 This ADR extends that boundary with run ownership and recovery; it does not change
