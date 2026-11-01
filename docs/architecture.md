@@ -16,7 +16,9 @@ cancellation are capability-gated. Future adapters must never block the event lo
 `/ws` is the legacy control plane described below. `/ws/avip` runs one session
 driver for every device label: `session.start` to `session.ready`, then JSON
 control text and, when audio input was negotiated, binary frames through
-`unpack_frame`. The id and the media queue are dropped when the socket closes.
+`unpack_frame`. A mock sink drains accepted uplink PCM for that socket; it is
+not a voice provider. The id, the sink task, and the media queue are dropped
+when the socket closes.
 That path does not construct an agent adapter or submit runs. `active_sessions`
 counts accepted sockets on both paths in this process. It is not a durable
 session table. The normative close codes and error envelopes are in the

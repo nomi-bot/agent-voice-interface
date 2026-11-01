@@ -3,6 +3,7 @@ import asyncio
 import json
 from pathlib import Path
 import re
+import time
 import unittest
 from unittest.mock import patch
 
@@ -34,6 +35,12 @@ DISABLED = {
 }
 DOWNLINK = MEDIA["directions"]["audio_downlink"]
 JS_CLIENT = Path(__file__).parent / "fixtures" / "browser-avip-client.js"
+# 30.0 s of the M0 profile is 1500 frames × 20 ms at 16 kHz pcm_s16le.
+# Socket tests submit those frames as fast as each mirror echo returns,
+# which is faster than the media clock. The equivalent media duration is
+# 30 seconds; the assertion is that the queue does not stick at depth 8.
+SUSTAINED_MEDIA_US = 30_000_000
+SUSTAINED_FRAMES = SUSTAINED_MEDIA_US // media.NOMINAL_CHUNK_US
 
 
 def wire_error(code, field):
@@ -119,6 +126,7 @@ class ConformanceTests(unittest.IsolatedAsyncioTestCase):
                         self.assertEqual(second[0], second[1])
                         self.assertEqual(len(nominal), 640)
                 self.assertEqual(app.state.active_sessions, 0)
+                self.assertEqual(media.active_mock_sinks(), frozenset())
 
     async def test_device_label_does_not_select_a_path(self):
         golden = bytes.fromhex(MEDIA["vectors"][0]["payload_hex"])
@@ -183,6 +191,8 @@ class ConformanceTests(unittest.IsolatedAsyncioTestCase):
                             with self.assertRaises(TimeoutError):
                                 async with asyncio.timeout(0.05):
                                     await outgoing.get()
+                            self.assertEqual(self._only_sink().consumed, 1)
+                            self.assertEqual(self._only_sink().pending, 0)
                             await self._expect_text(
                                 incoming, outgoing,
                                 {"type": "ping"},
@@ -197,6 +207,9 @@ class ConformanceTests(unittest.IsolatedAsyncioTestCase):
                     with self.subTest(client=client.kind):
                         async with connection() as (incoming, outgoing):
                             await self._handshake(client, incoming, outgoing)
+                            # The mock sink drains uplink frames. Pause it so
+                            # this test can still fill the depth cap.
+                            self._only_sink().pause()
                             clock = 0
                             for sequence in range(media.MAX_QUEUE_DEPTH):
                                 raw = client.pack_uplink(sequence, sequence * 20_000, payload)
@@ -214,6 +227,8 @@ class ConformanceTests(unittest.IsolatedAsyncioTestCase):
                             error = await self._json(outgoing)
                             self.assertEqual(error, wire_error("queue_full", None))
                             self.assertNotIn(TOKEN, json.dumps(error))
+                            self.assertEqual(self._only_sink().consumed, 0)
+                            self.assertEqual(self._only_sink().pending, media.MAX_QUEUE_DEPTH)
                             await self._expect_text(
                                 incoming, outgoing,
                                 {"type": "ping", "request_id": TOKEN},
@@ -311,6 +326,7 @@ class ConformanceTests(unittest.IsolatedAsyncioTestCase):
             async with app.router.lifespan_context(app):
                 async with connection() as (incoming, outgoing):
                     await self._handshake(client, incoming, outgoing, DISABLED)
+                    self.assertEqual(media.active_mock_sinks(), frozenset())
                     await self._reject_frame(
                         incoming, outgoing,
                         client.pack_uplink(0, 0, b"\x00\x00"),
@@ -339,6 +355,253 @@ class ConformanceTests(unittest.IsolatedAsyncioTestCase):
                         await asyncio.wait_for(entered.wait(), 1)
                         await self._close(outgoing, 1013, "Send timeout")
                     self.assertEqual(app.state.active_sessions, 0)
+
+    async def test_mock_sink_sustains_thirty_seconds_of_uplink(self):
+        """1500 nominal frames is 30.0 s of 16 kHz pcm_s16le.
+
+        Each frame is 20 ms and 640 bytes. The test does not sleep 20 ms:
+        it submits the next frame as soon as the mirror echo returns, faster
+        than the media clock. A stuck depth of 8 would reject a frame.
+        """
+        self.assertEqual(SUSTAINED_FRAMES, 1500)
+        self.assertEqual(SUSTAINED_FRAMES * media.NOMINAL_CHUNK_US, SUSTAINED_MEDIA_US)
+        self.assertEqual(media.NOMINAL_PAYLOAD_BYTES, 640)
+        payload = bytes(media.NOMINAL_PAYLOAD_BYTES)
+        with self._audio_available():
+            async with app.router.lifespan_context(app):
+                for client in both_clients():
+                    with self.subTest(client=client.kind):
+                        async with connection() as (incoming, outgoing):
+                            await self._handshake(client, incoming, outgoing)
+                            sink = self._only_sink()
+                            clock = 0
+                            for sequence in range(SUSTAINED_FRAMES):
+                                raw = client.pack_uplink(
+                                    sequence, sequence * media.NOMINAL_CHUNK_US, payload
+                                )
+                                await send_frame(incoming, data=raw)
+                                echo = await self._bytes(outgoing)
+                                self.assertEqual(echo, mirror(sequence, clock, payload))
+                                clock += duration_us(payload)
+                                self.assertLess(sink.pending, media.MAX_QUEUE_DEPTH)
+                            self.assertEqual(clock, SUSTAINED_MEDIA_US)
+                            self.assertEqual(sink.consumed, SUSTAINED_FRAMES)
+                            self.assertEqual(sink.pending, 0)
+                            self.assertEqual(sink.last_sequence, SUSTAINED_FRAMES - 1)
+                            self.assertEqual(
+                                sink.consumed_bytes, SUSTAINED_FRAMES * len(payload)
+                            )
+                        self.assertEqual(media.active_mock_sinks(), frozenset())
+                        self.assertEqual(self._sink_tasks(), [])
+
+    async def test_mock_sink_sustains_thirty_seconds_of_wall_clock(self):
+        """Pace one frame every 20 ms until 30 seconds of wall clock have elapsed.
+
+        The headless client uses the same ``/ws/avip`` path as the browser-shaped
+        client. The accelerated test above covers both. This one records how
+        many frames were accepted or rejected, the queue depth the test
+        observed, the sink high-water mark, and that cleanup removed the task.
+        """
+        period = media.NOMINAL_CHUNK_US / 1_000_000
+        self.assertEqual(period, 0.02)
+        payload = bytes(media.NOMINAL_PAYLOAD_BYTES)
+        client = HeadlessPythonClient()
+        accepted = 0
+        rejected = 0
+        max_pending = 0
+        with self._audio_available():
+            async with app.router.lifespan_context(app):
+                async with connection() as (incoming, outgoing):
+                    await self._handshake(client, incoming, outgoing)
+                    sink = self._only_sink()
+                    start = time.monotonic()
+                    clock = 0
+                    for sequence in range(SUSTAINED_FRAMES):
+                        delay = start + sequence * period - time.monotonic()
+                        if delay > 0:
+                            await asyncio.sleep(delay)
+                        await send_frame(
+                            incoming,
+                            data=client.pack_uplink(
+                                sequence, sequence * media.NOMINAL_CHUNK_US, payload
+                            ),
+                        )
+                        event = await asyncio.wait_for(outgoing.get(), 1)
+                        if "bytes" in event:
+                            accepted += 1
+                            self.assertEqual(event["bytes"], mirror(sequence, clock, payload))
+                            clock += duration_us(payload)
+                        else:
+                            rejected += 1
+                        max_pending = max(max_pending, sink.pending)
+                    remainder = start + 30.0 - time.monotonic()
+                    if remainder > 0:
+                        await asyncio.sleep(remainder)
+                    elapsed = time.monotonic() - start
+                    summary = (
+                        f"accepted={accepted} rejected={rejected} "
+                        f"max_pending={max_pending} high_water={sink.high_water} "
+                        f"consumed={sink.consumed} elapsed={elapsed:.3f}"
+                    )
+                    self.assertGreaterEqual(elapsed, 30.0, summary)
+                    self.assertEqual(accepted, SUSTAINED_FRAMES, summary)
+                    self.assertEqual(rejected, 0, summary)
+                    self.assertEqual(sink.consumed, SUSTAINED_FRAMES, summary)
+                    self.assertEqual(sink.pending, 0, summary)
+                    self.assertLess(max_pending, media.MAX_QUEUE_DEPTH, summary)
+                    self.assertGreaterEqual(sink.high_water, 1, summary)
+                    self.assertLess(sink.high_water, media.MAX_QUEUE_DEPTH, summary)
+                self.assertEqual(media.active_mock_sinks(), frozenset())
+                self.assertEqual(self._sink_tasks(), [])
+
+    async def test_pipelined_burst_does_not_stick_at_the_cap(self):
+        client = HeadlessPythonClient()
+        payload = b"\x01\x02"
+        count = media.MAX_QUEUE_DEPTH + 4
+        with self._audio_available():
+            async with app.router.lifespan_context(app):
+                async with connection() as (incoming, outgoing):
+                    await self._handshake(client, incoming, outgoing)
+                    for sequence in range(count):
+                        await send_frame(
+                            incoming,
+                            data=client.pack_uplink(sequence, sequence * 20_000, payload),
+                        )
+                    for sequence in range(count):
+                        echo = await self._bytes(outgoing)
+                        decoded = client.unpack(echo)
+                        self.assertEqual(sequence_of(decoded), sequence)
+                        self.assertEqual(payload_of(decoded), payload)
+                    sink = self._only_sink()
+                    self.assertEqual(sink.consumed, count)
+                    self.assertEqual(sink.pending, 0)
+                    self.assertGreaterEqual(sink.high_water, 1)
+                    self.assertLess(sink.high_water, media.MAX_QUEUE_DEPTH)
+
+    async def test_paused_sink_rejects_a_pipelined_burst(self):
+        client = HeadlessPythonClient()
+        payload = b"\x01\x02"
+        count = media.MAX_QUEUE_DEPTH + 1
+        with self._audio_available():
+            async with app.router.lifespan_context(app):
+                async with connection() as (incoming, outgoing):
+                    await self._handshake(client, incoming, outgoing)
+                    sink = self._only_sink()
+                    sink.pause()
+                    for sequence in range(count):
+                        await send_frame(
+                            incoming,
+                            data=client.pack_uplink(sequence, sequence * 20_000, payload),
+                        )
+                    echoes = 0
+                    rejected = 0
+                    for _ in range(count):
+                        event = await asyncio.wait_for(outgoing.get(), 1)
+                        if "bytes" in event:
+                            echoes += 1
+                        else:
+                            rejected += 1
+                            self.assertEqual(
+                                json.loads(event["text"]),
+                                wire_error("queue_full", None),
+                            )
+                    self.assertEqual(echoes, media.MAX_QUEUE_DEPTH)
+                    self.assertEqual(rejected, 1)
+                    self.assertEqual(sink.consumed, 0)
+                    self.assertEqual(sink.pending, media.MAX_QUEUE_DEPTH)
+                    self.assertEqual(sink.high_water, media.MAX_QUEUE_DEPTH)
+
+    async def test_paused_and_metered_sink_keep_reject_newest_backpressure(self):
+        payload = b"\x01\x02"
+        with self._audio_available():
+            async with app.router.lifespan_context(app):
+                for client in both_clients():
+                    with self.subTest(client=client.kind):
+                        async with connection() as (incoming, outgoing):
+                            await self._handshake(client, incoming, outgoing)
+                            sink = self._only_sink()
+                            sink.pause()
+                            for sequence in range(media.MAX_QUEUE_DEPTH):
+                                await send_frame(
+                                    incoming,
+                                    data=client.pack_uplink(
+                                        sequence, sequence * 20_000, payload
+                                    ),
+                                )
+                                await self._bytes(outgoing)
+                            refused = media.MAX_QUEUE_DEPTH
+                            raw = client.pack_uplink(refused, refused * 20_000, payload)
+                            await send_frame(incoming, data=raw)
+                            self.assertEqual(
+                                await self._json(outgoing), wire_error("queue_full", None)
+                            )
+                            self.assertEqual(sink.consumed, 0)
+                            sink.allow(1)
+                            self.assertEqual(sink.consumed, 1)
+                            self.assertEqual(sink.pending, media.MAX_QUEUE_DEPTH - 1)
+                            await send_frame(incoming, data=raw)
+                            echo = await self._bytes(outgoing)
+                            self.assertEqual(sequence_of(client.unpack(echo)), refused)
+                            self.assertEqual(sink.pending, media.MAX_QUEUE_DEPTH)
+                            ahead = client.pack_uplink(
+                                refused + 1, (refused + 1) * 20_000, payload
+                            )
+                            await send_frame(incoming, data=ahead)
+                            self.assertEqual(
+                                await self._json(outgoing), wire_error("queue_full", None)
+                            )
+                            sink.resume()
+                            self.assertEqual(sink.pending, 0)
+                            self.assertEqual(sink.consumed, media.MAX_QUEUE_DEPTH + 1)
+                            await send_frame(incoming, data=ahead)
+                            echo = await self._bytes(outgoing)
+                            self.assertEqual(sequence_of(client.unpack(echo)), refused + 1)
+                            self.assertEqual(sink.consumed, media.MAX_QUEUE_DEPTH + 2)
+                        self.assertEqual(media.active_mock_sinks(), frozenset())
+                        self.assertEqual(self._sink_tasks(), [])
+
+    async def test_session_end_cancels_the_sink_and_clears_the_queue(self):
+        payload = b"\x11\x22"
+        with self._audio_available():
+            async with app.router.lifespan_context(app):
+                for client in both_clients():
+                    with self.subTest(client=client.kind):
+                        async with connection() as (incoming, outgoing):
+                            await self._handshake(client, incoming, outgoing)
+                            sink = self._only_sink()
+                            sink.pause()
+                            await send_frame(
+                                incoming, data=client.pack_uplink(0, 0, payload)
+                            )
+                            await self._bytes(outgoing)
+                            self.assertEqual(sink.pending, 1)
+                            self.assertEqual(sink.consumed, 0)
+                            self.assertTrue(sink.running)
+                            self.assertEqual(len(self._sink_tasks()), 1)
+                        self.assertFalse(sink.running)
+                        self.assertEqual(sink.pending, 0)
+                        self.assertEqual(media.active_mock_sinks(), frozenset())
+                        self.assertEqual(self._sink_tasks(), [])
+                        async with connection() as (incoming, outgoing):
+                            await self._handshake(client, incoming, outgoing)
+                            await send_frame(
+                                incoming, data=client.pack_uplink(0, 0, payload)
+                            )
+                            self.assertEqual(
+                                await self._bytes(outgoing), mirror(0, 0, payload)
+                            )
+                            self.assertEqual(self._only_sink().consumed, 1)
+
+    def _only_sink(self):
+        sinks = media.active_mock_sinks()
+        self.assertEqual(len(sinks), 1)
+        return next(iter(sinks))
+
+    def _sink_tasks(self):
+        return [
+            task for task in asyncio.all_tasks()
+            if task.get_name() == media.MockMediaSink.TASK_NAME
+        ]
 
     def _audio_available(self):
         return patch(

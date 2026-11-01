@@ -1,11 +1,14 @@
 """AVIP v1 binary media frames and bounded delivery.
 
 This module is transport-independent. It does not open sockets, route audio
-to a provider, or conceal loss. ``/ws/avip`` passes one complete binary
-message to ``unpack_frame`` and submits the result here. Text stays on the
-JSON control plane. Callers must not define a second layout.
+to a voice provider, or conceal loss. ``/ws/avip`` passes one complete binary
+message to ``unpack_frame`` and submits the result here. ``MockMediaSink``
+takes accepted uplink frames so the bounded queue can accept a continuous
+stream. Text stays on the JSON control plane. Callers must not define a
+second layout.
 """
 
+import asyncio
 from collections import deque
 from dataclasses import dataclass
 from enum import IntEnum
@@ -290,6 +293,12 @@ class MediaDelivery:
             Direction.AUDIO_UPLINK: MediaQueue(max_depth),
             Direction.AUDIO_DOWNLINK: MediaQueue(max_depth),
         }
+        # Level-triggered wakeups for one waiting consumer per direction.
+        # Event construction does not need a running loop.
+        self._ready = {
+            Direction.AUDIO_UPLINK: asyncio.Event(),
+            Direction.AUDIO_DOWNLINK: asyncio.Event(),
+        }
 
     def submit(self, frame: MediaFrame) -> None:
         if type(frame) is not MediaFrame:
@@ -297,6 +306,24 @@ class MediaDelivery:
         self._stream.check(frame)
         self._queues[frame.direction].offer(frame)
         self._stream.commit(frame)
+        self._ready[frame.direction].set()
+
+    async def wait_for(self, direction: object) -> None:
+        """Return when ``take`` might succeed for ``direction``.
+
+        A frame that is already queued does not block. The wait is
+        level-triggered and may wake spuriously; the caller must ``take``
+        and wait again when the queue is empty. Safe only on one event
+        loop. Not safe to share across threads.
+        """
+        resolved = _require_direction(direction)
+        ready = self._ready[resolved]
+        if self._queues[resolved]:
+            return
+        ready.clear()
+        if self._queues[resolved]:
+            return
+        await ready.wait()
 
     def ingest(self, buffer: object) -> MediaFrame:
         frame = unpack_frame(buffer)
@@ -313,3 +340,163 @@ class MediaDelivery:
         if direction is None:
             return sum(queue.clear() for queue in self._queues.values())
         return self._queues[_require_direction(direction)].clear()
+
+
+_ACTIVE_SINKS: set["MockMediaSink"] = set()
+
+
+def active_mock_sinks() -> frozenset["MockMediaSink"]:
+    """Return mock sinks that have been started and not yet stopped."""
+    return frozenset(_ACTIVE_SINKS)
+
+
+class MockMediaSink:
+    """Discard accepted uplink PCM so a session can stream past the depth cap.
+
+    This is the M0 stand-in for a voice provider. It does not call a model,
+    write audio anywhere, or generate downlink frames. The ``/ws/avip`` mirror
+    remains a separate framing check and does not take from this queue.
+
+    A willing sink takes queued uplink frames inside ``reclaim``. The session
+    calls that on the producer turn after a successful submit, so a fast
+    sender does not depend on a later scheduler tick. ``pause`` is not
+    willing, so those frames stay in the bounded queue and a faster sender
+    observes ``queue_full``. ``allow`` becomes willing for that many takes
+    and reclaims immediately. ``resume`` is willing for every queued frame.
+    The background task waits on those same signals and reclaims when the
+    producer is not in ``reclaim`` itself. It does not poll.
+    """
+
+    TASK_NAME = "avip-mock-media-sink"
+
+    def __init__(self, delivery: MediaDelivery):
+        if type(delivery) is not MediaDelivery:
+            raise TypeError("delivery must be a MediaDelivery")
+        self._delivery = delivery
+        # None drains without a credit limit. Zero waits. A positive count
+        # is how many successful takes remain before the sink waits again.
+        self._limit: int | None = None
+        self._wake = asyncio.Event()
+        self._progress = asyncio.Event()
+        self._task: asyncio.Task[None] | None = None
+        self.consumed = 0
+        self.consumed_bytes = 0
+        self.high_water = 0
+        self.last_sequence: int | None = None
+
+    def __repr__(self) -> str:
+        return (
+            f"MockMediaSink(consumed={self.consumed}, pending={self.pending}, "
+            f"running={self.running})"
+        )
+
+    @property
+    def pending(self) -> int:
+        return self._delivery.depth(Direction.AUDIO_UPLINK)
+
+    @property
+    def running(self) -> bool:
+        task = self._task
+        return task is not None and not task.done()
+
+    def _willing(self) -> bool:
+        return self._limit is None or self._limit > 0
+
+    def _note(self, frame: MediaFrame) -> None:
+        if self._limit is not None:
+            self._limit -= 1
+        self.consumed += 1
+        self.consumed_bytes += len(frame.payload)
+        self.last_sequence = frame.sequence
+
+    def reclaim(self) -> int:
+        """Take every uplink frame this sink is currently willing to accept.
+
+        Synchronous. A paused or exhausted sink takes nothing and leaves the
+        queue unchanged. Records the depth observed before taking.
+        """
+        self.high_water = max(self.high_water, self.pending)
+        taken = 0
+        while self._willing():
+            frame = self._delivery.take(Direction.AUDIO_UPLINK)
+            if frame is None:
+                break
+            self._note(frame)
+            taken += 1
+        if taken:
+            self._progress.set()
+        return taken
+
+    async def wait_consumed(self, count: int) -> None:
+        """Wait until ``consumed`` reaches ``count``. Does not poll."""
+        if type(count) is not int or count < 0:
+            raise ValueError("count must be a non-negative integer")
+        while self.consumed < count:
+            self._progress.clear()
+            if self.consumed >= count:
+                return
+            await self._progress.wait()
+
+    def start(self) -> None:
+        if self._task is not None:
+            raise RuntimeError("mock media sink already started")
+        self._task = asyncio.create_task(self._consume(), name=self.TASK_NAME)
+        _ACTIVE_SINKS.add(self)
+
+    def pause(self) -> None:
+        """Take no further uplink frames until ``resume`` or ``allow``."""
+        self._limit = 0
+
+    def resume(self) -> None:
+        """Drain every queued uplink frame, then keep draining new ones."""
+        self._limit = None
+        self._wake.set()
+        self.reclaim()
+
+    def allow(self, count: int = 1) -> None:
+        """Take up to ``count`` uplink frames, then wait again.
+
+        This switches a draining sink into the metered mode and reclaims
+        immediately. ``count`` is a positive integer. The value is not
+        copied into the error text.
+        """
+        if type(count) is not int or count < 1:
+            raise ValueError("count must be a positive integer")
+        if self._limit is None:
+            self._limit = 0
+        self._limit += count
+        self._wake.set()
+        self.reclaim()
+
+    async def _wait_until_willing(self) -> None:
+        while not self._willing():
+            self._wake.clear()
+            if self._willing():
+                return
+            await self._wake.wait()
+
+    async def _consume(self) -> None:
+        while True:
+            if not self._willing():
+                await self._wait_until_willing()
+                continue
+            if self.reclaim():
+                continue
+            await self._delivery.wait_for(Direction.AUDIO_UPLINK)
+
+    async def stop(self) -> None:
+        """Cancel the consumer and drop any uplink frames still queued."""
+        task = self._task
+        self._task = None
+        _ACTIVE_SINKS.discard(self)
+        try:
+            if task is not None:
+                if not task.done():
+                    task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    if not task.cancelled():
+                        raise
+        finally:
+            self._delivery.clear(Direction.AUDIO_UPLINK)

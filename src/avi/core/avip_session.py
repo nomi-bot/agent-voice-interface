@@ -11,10 +11,12 @@ send failures record ``failed``. This driver does not enter ``reconnecting``
 and does not create a VoiceResponse or an AgentRun.
 
 After ``session.ready``, text frames stay on the JSON control plane. One binary
-message is one media frame, passed through ``unpack_frame``. The same driver
-handles every device label.
+message is one media frame, passed through ``unpack_frame``. Accepted uplink
+frames are queued and then taken by a mock sink on this session. The same
+driver handles every device label.
 """
 import asyncio
+import logging
 import secrets
 from typing import NoReturn, Protocol
 
@@ -34,11 +36,14 @@ from avi.protocols.media import (
     Direction,
     MediaDelivery,
     MediaFrame,
+    MockMediaSink,
     next_sequence,
     pack_frame,
     unpack_frame,
 )
 from avi.transports.base import TransportDisconnected, TransportFrameError
+
+logger = logging.getLogger(__name__)
 
 
 def allocate_session_id() -> str:
@@ -94,6 +99,7 @@ class AvipSession:
         self.session_id: str | None = None
         self.negotiated: Capabilities | None = None
         self.delivery: MediaDelivery | None = None
+        self.sink: MockMediaSink | None = None
         self.voice_session = VoiceSession()
         self._downlink_sequence = 0
         self._downlink_timestamp = 0
@@ -147,6 +153,9 @@ class AvipSession:
             request_id=start.request_id,
             device_id=start.device_id,
         )
+        if self.negotiated.audio_input:
+            self.sink = MockMediaSink(self.delivery)
+            self.sink.start()
 
     async def _on_media(self, data: bytes) -> None:
         """Queue one uplink frame and, when output was negotiated, mirror it.
@@ -157,10 +166,13 @@ class AvipSession:
         advances by the payload duration at 16 kHz. Those clocks are not the
         client's clocks.
 
-        Accepted uplink frames stay queued. Nothing here consumes them, so the
-        depth cap is reachable. ``queue_full`` is an error envelope and leaves
-        the socket open; the refused frame keeps its sequence. Any other frame
-        error is fatal for this connection.
+        Accepted uplink frames are offered to the session mock sink. When the
+        sink is willing, ``reclaim`` takes them before this method reads
+        another frame, on this turn, with no scheduler yield. A paused or
+        metered sink leaves the frame queued. The mirror does not take it.
+        ``queue_full`` is an error envelope and leaves the socket open; the
+        refused frame keeps its sequence. Any other frame error is fatal for
+        this connection.
         """
         negotiated = self.negotiated
         delivery = self.delivery
@@ -181,17 +193,18 @@ class AvipSession:
                 await self._send(error_envelope(exc))
                 return
             await self._reject(exc, 1002, "Protocol error")
-        if not negotiated.audio_output:
-            return
-        echo = MediaFrame(
-            Direction.AUDIO_DOWNLINK,
-            self._downlink_sequence,
-            self._downlink_timestamp,
-            frame.payload,
-        )
-        await self._send_bytes(pack_frame(echo))
-        self._downlink_sequence = next_sequence(self._downlink_sequence)
-        self._downlink_timestamp += _duration_us(frame.payload)
+        if self.sink is not None:
+            self.sink.reclaim()
+        if negotiated.audio_output:
+            echo = MediaFrame(
+                Direction.AUDIO_DOWNLINK,
+                self._downlink_sequence,
+                self._downlink_timestamp,
+                frame.payload,
+            )
+            await self._send_bytes(pack_frame(echo))
+            self._downlink_sequence = next_sequence(self._downlink_sequence)
+            self._downlink_timestamp += _duration_us(frame.payload)
 
     async def _until_disconnect(self) -> None:
         while self.session_id is not None:
@@ -227,12 +240,24 @@ class AvipSession:
             try:
                 self._end_voice_session(ending)
             finally:
-                self.session_id = None
-                self.negotiated = None
-                self.delivery = None
-                if ending is not None:
-                    try:
-                        async with asyncio.timeout(self.limits.send_timeout):
-                            await self.transport.close(ending.code, ending.reason)
-                    except (TimeoutError, TransportDisconnected):
-                        pass
+                sink = self.sink
+                self.sink = None
+                try:
+                    if sink is not None:
+                        try:
+                            async with asyncio.timeout(self.limits.cleanup_timeout):
+                                await sink.stop()
+                        except Exception:
+                            logger.exception("Mock media sink cleanup failed")
+                finally:
+                    if self.delivery is not None:
+                        self.delivery.clear()
+                    self.delivery = None
+                    self.session_id = None
+                    self.negotiated = None
+                    if ending is not None:
+                        try:
+                            async with asyncio.timeout(self.limits.send_timeout):
+                                await self.transport.close(ending.code, ending.reason)
+                        except (TimeoutError, TransportDisconnected):
+                            pass

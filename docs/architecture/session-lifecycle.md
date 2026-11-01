@@ -49,6 +49,10 @@ and does not relabel the session.
 - The driver does not call `lose_transport` or `reattach`. There is still no
   reconnect handshake.
 - The driver does not construct a `VoiceResponse` or an `AgentRun`.
+- When audio input was negotiated, a mock sink task takes uplink frames it is
+  willing to accept. `reclaim` runs on the producer turn. Closing the
+  VoiceSession cancels that task and clears the media queues. The sink is not
+  a voice provider, and this does not finish M0.
 
 ## VoiceResponse
 

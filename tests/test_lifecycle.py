@@ -20,7 +20,7 @@ from avi.core.lifecycle import (
 )
 from avi.core.session import SessionLimits
 from avi.protocols.avip import Capabilities
-from avi.protocols.media import Direction, MediaFrame, pack_frame
+from avi.protocols.media import Direction, MediaFrame, active_mock_sinks, pack_frame
 from avi.transports.base import TransportDisconnected
 
 
@@ -592,6 +592,64 @@ class AvipLifecycleTests(unittest.IsolatedAsyncioTestCase):
             ["session.ready"],
         )
         self.assertIsNone(transport.closed)
+        self.assertIsNone(session.sink)
+        self.assertIsNone(session.delivery)
+        self.assertEqual(active_mock_sinks(), frozenset())
+
+    async def test_media_protocol_error_fails_and_stops_the_sink(self):
+        message = copy.deepcopy(FIXTURES["valid"][0]["message"])
+        transport = ScriptedTransport([("text", message), ("binary", b"NO")])
+        session = await self._run(
+            transport,
+            available=Capabilities(audio_input=True, audio_output=True),
+        )
+        self.assertIs(session.voice_session.state, VoiceSessionState.CLOSED)
+        self.assertIs(session.voice_session.close_reason, SessionCloseReason.FAILED)
+        self.assertEqual(transport.closed, (1002, "Protocol error"))
+        self.assertIsNone(session.sink)
+        self.assertEqual(active_mock_sinks(), frozenset())
+        self.assertFalse(any(
+            task.get_name() == "avip-mock-media-sink" for task in asyncio.all_tasks()
+        ))
+
+    async def test_idle_after_ready_disconnects_and_stops_the_sink(self):
+        class IdleAfterReady(ScriptedTransport):
+            async def receive_message(self):
+                if self.messages:
+                    return await ScriptedTransport.receive_message(self)
+                await asyncio.Event().wait()
+
+        message = copy.deepcopy(FIXTURES["valid"][0]["message"])
+        transport = IdleAfterReady([("text", message)])
+        session = await self._run(
+            transport,
+            SessionLimits(idle_timeout=0.05),
+            Capabilities(audio_input=True),
+        )
+        self.assertIs(session.voice_session.close_reason, SessionCloseReason.DISCONNECTED)
+        self.assertTrue(session.voice_session.session_id)
+        self.assertEqual(transport.closed, (1001, "Idle timeout"))
+        self.assertIsNone(session.sink)
+        self.assertEqual(active_mock_sinks(), frozenset())
+
+    async def test_stalled_mirror_fails_and_stops_the_sink(self):
+        class StallBytes(ScriptedTransport):
+            async def send_bytes(self, payload):
+                self.sent.append(payload)
+                await asyncio.Event().wait()
+
+        message = copy.deepcopy(FIXTURES["valid"][0]["message"])
+        frame = pack_frame(MediaFrame(Direction.AUDIO_UPLINK, 0, 0, b"\x01\x00"))
+        transport = StallBytes([("text", message), ("binary", frame)])
+        session = await self._run(
+            transport,
+            SessionLimits(send_timeout=0.05),
+            Capabilities(audio_input=True, audio_output=True),
+        )
+        self.assertIs(session.voice_session.close_reason, SessionCloseReason.FAILED)
+        self.assertEqual(transport.closed, (1013, "Send timeout"))
+        self.assertIsNone(session.sink)
+        self.assertEqual(active_mock_sinks(), frozenset())
 
     async def test_protocol_failures_close_as_failed_and_never_activate(self):
         cases = (
