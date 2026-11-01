@@ -43,21 +43,32 @@ class AudioFrame:
 class UplinkClock:
     """Sender clock for client capture.
 
-    Sequence starts at 0 and wraps at 2**32. ``timestamp_us`` starts at 0 and
-    advances by the nominal 20 ms chunk after each packed frame. That step
-    matches a 640-byte payload on the M0 clock. It is not the gateway mirror
-    clock. A failed pack does not move the clock.
+    Sequence starts at 0 and wraps at 2**32. ``timestamp_us`` starts at 0.
+    ``encode`` does not move the clock. ``commit`` advances the timestamp by
+    the nominal 20 ms chunk, which matches a 640-byte payload on the M0 clock.
+    It is not the gateway mirror clock.
+
+    Call ``commit`` only after the socket has accepted the frame. Acceptance
+    means the bytes were queued locally. It is not a peer acknowledgement.
+    If send raises, do not commit: the same sequence may be retried on this
+    socket while it is still open. If send returns and the socket later
+    closes, the frame may or may not have been delivered. Do not send that
+    sequence again on this socket. M0 does not reconnect. A new connection is
+    a new session and starts at sequence 0.
     """
 
     def __init__(self) -> None:
         self.sequence = 0
         self.timestamp_us = 0
 
-    def pack(self, payload: bytes) -> bytes:
-        raw = pack_frame(AUDIO_UPLINK, self.sequence, self.timestamp_us, payload)
+    def encode(self, payload: bytes) -> bytes:
+        """Return the current uplink frame without moving the clock."""
+        return pack_frame(AUDIO_UPLINK, self.sequence, self.timestamp_us, payload)
+
+    def commit(self) -> None:
+        """Advance after the socket has accepted the encoded frame."""
         self.sequence = (self.sequence + 1) % 2**32
         self.timestamp_us += NOMINAL_CHUNK_US
-        return raw
 
 
 def pack_frame(

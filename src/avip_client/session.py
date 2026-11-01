@@ -6,9 +6,16 @@ audio. It does not reconnect, and it does not start an agent run.
 
 from collections.abc import Mapping
 
+from websockets.exceptions import ConnectionClosed
+
 from avip_client.errors import AvipError
 from avip_client.framing import UplinkClock, unpack_frame
 from avip_client.messages import parse_server_text, session_start
+
+# Unread messages held by the library before it pauses the socket. This is
+# transport backpressure, not an application reject. The browser client uses
+# the same depth and then fails the session.
+_RECEIVE_QUEUE = 8
 
 
 class AvipClient:
@@ -50,6 +57,7 @@ class AvipClient:
         self._clock = UplinkClock()
         self._ws = None
         self._started = False
+        self._closed = False
 
     async def __aenter__(self):
         from websockets.asyncio.client import connect
@@ -60,21 +68,33 @@ class AvipClient:
             compression=None,
             proxy=None,
             max_size=16 * 1024,
+            max_queue=_RECEIVE_QUEUE,
             user_agent_header=None,
         )
         return self
 
     async def __aexit__(self, exc_type, exc, tb):
+        self._closed = True
         if self._ws is not None:
             await self._ws.close()
             self._ws = None
         return False
 
+    @property
+    def closed(self) -> bool:
+        """True after the socket has ended. The client does not reconnect."""
+        return self._closed
+
     async def start(self) -> dict:
         """Send ``session.start`` and return the ``session.ready`` object."""
         if self._started:
             raise AvipError("session_already_started")
-        await self._ws.send(self._start_text)
+        self._require_open()
+        try:
+            await self._ws.send(self._start_text)
+        except ConnectionClosed:
+            self._closed = True
+            raise
         message = await self.recv()
         if not isinstance(message, dict) or message.get("type") != "session.ready":
             raise AvipError("invalid_message", "type")
@@ -82,20 +102,42 @@ class AvipClient:
         return message
 
     async def send_uplink(self, payload: bytes) -> None:
-        """Pack the next uplink frame and send it as one binary message."""
+        """Send one uplink frame.
+
+        The clock advances only after ``send`` returns. A raised error means
+        the socket did not accept the frame, so the sequence is unchanged and
+        may be retried on this socket if it is still open. A successful return
+        means the bytes were queued locally, not that the peer acknowledged
+        them. If the socket later closes, that frame may or may not have been
+        delivered; do not send the same sequence again here. This client does
+        not reconnect. Open a new ``AvipClient`` for a new session, which
+        starts at sequence 0.
+        """
+        self._require_open()
         if not self._started:
             raise AvipError("invalid_message")
-        await self._ws.send(self._clock.pack(payload))
+        raw = self._clock.encode(payload)
+        try:
+            await self._ws.send(raw)
+        except ConnectionClosed:
+            self._closed = True
+            raise
+        self._clock.commit()
 
     async def recv(self):
         """Return a ``session.ready`` dict or one decoded downlink frame.
 
         A server ``error`` envelope raises ``AvipError`` with that code and
-        field. Other JSON objects are returned as dicts.
+        field. Other JSON objects are returned as dicts. The library holds at
+        most 8 unread messages and then pauses the socket. Peer disconnect
+        raises ``ConnectionClosed`` and marks this client closed.
         """
-        if self._ws is None:
-            raise AvipError("invalid_message")
-        raw = await self._ws.recv()
+        self._require_open()
+        try:
+            raw = await self._ws.recv()
+        except ConnectionClosed:
+            self._closed = True
+            raise
         if isinstance(raw, str):
             message = parse_server_text(raw)
             if message.get("type") == "error":
@@ -111,3 +153,7 @@ class AvipClient:
         if type(raw) is not bytes:
             raise AvipError("invalid_message")
         return unpack_frame(raw)
+
+    def _require_open(self) -> None:
+        if self._closed or self._ws is None:
+            raise AvipError("socket_closed")

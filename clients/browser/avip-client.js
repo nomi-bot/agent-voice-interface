@@ -15,6 +15,8 @@ const CODEC_PCM_S16LE = 1;
 const MAX_PAYLOAD_BYTES = 8192;
 const MAX_FRAME_BYTES = HEADER_BYTES + MAX_PAYLOAD_BYTES;
 const NOMINAL_CHUNK_US = 20000n;
+// Unread messages with no waiting receiver. One more fails the session.
+const MAX_PENDING_MESSAGES = 8;
 const UINT32_MAX = 0xffffffff;
 const UINT64_MAX = 0xffffffffffffffffn;
 const ENVELOPE_KEYS = ["protocol", "type", "request_id", "session_id", "device_id", "capabilities"];
@@ -148,6 +150,11 @@ function bytesToHex(bytes) {
 }
 
 export class AvipBrowserClient {
+  // `state` is "idle", "connecting", "open", or "closed". "closed" is terminal:
+  // disconnect, a socket error, `close()`, or a full receive buffer all end
+  // here. Every waiting `start` / `nextFrame` receiver rejects. Buffered
+  // messages can still be read; the next receive after the buffer rejects.
+  // This client does not reconnect. A new session starts at sequence 0.
   constructor({url, requestId, deviceId, capabilities}) {
     this.url = url;
     this.requestId = requestId;
@@ -157,8 +164,15 @@ export class AvipBrowserClient {
     this.timestampUs = 0n;
     this.socket = null;
     this.started = false;
+    this.state = "idle";
+    this.failure = null;
     this._pending = [];
     this._waiters = [];
+    this._rejectConnect = null;
+  }
+
+  get pending() {
+    return this._pending.length;
   }
 
   // `headers` is the Node WebSocket options bag (`new WebSocket(url, {headers})`).
@@ -167,19 +181,44 @@ export class AvipBrowserClient {
   // `connect()` with no argument. The browser sets Origin from the page
   // (`http://127.0.0.1:8000` or `http://localhost:8000`).
   connect(headers) {
+    if (this.state !== "idle") fail("invalid_message");
+    this.state = "connecting";
     this.socket = headers ? new WebSocket(this.url, {headers}) : new WebSocket(this.url);
     this.socket.binaryType = "arraybuffer";
     this.socket.addEventListener("message", (event) => {
       this._push(event.data);
     });
+    this.socket.addEventListener("error", () => {
+      this._fail(new Error("socket error"));
+    });
+    this.socket.addEventListener("close", () => {
+      this._fail(new Error("socket closed"));
+    });
     return new Promise((resolve, reject) => {
-      this.socket.addEventListener("open", () => resolve());
-      this.socket.addEventListener("error", () => reject(new Error("socket error")));
+      let settled = false;
+      this._rejectConnect = (error) => {
+        if (settled) return;
+        settled = true;
+        reject(error);
+      };
+      this.socket.addEventListener("open", () => {
+        if (settled) return;
+        settled = true;
+        this._rejectConnect = null;
+        if (this.state === "closed") {
+          reject(this.failure);
+          return;
+        }
+        this.state = "open";
+        resolve();
+      });
     });
   }
 
   async start() {
     if (this.started) fail("session_already_started");
+    if (this.state === "closed") throw this.failure;
+    if (this.state !== "open") fail("invalid_message");
     const text = encodeSessionStart({
       protocol: PROTOCOL,
       type: "session.start",
@@ -195,12 +234,19 @@ export class AvipBrowserClient {
     return message;
   }
 
+  // The clock advances only after `send` returns. A throw means the socket
+  // did not accept the frame, so the same sequence may be retried on this
+  // socket while it is still open. A return means the bytes were queued
+  // locally, not that the peer acknowledged them. If the socket later closes,
+  // that frame may or may not have been delivered; do not send that sequence
+  // again here. A new connection is a new session and starts at sequence 0.
   sendUplink(payload) {
-    if (!this.started) fail("invalid_message");
+    if (this.state === "closed") throw this.failure;
+    if (!this.started || this.state !== "open") fail("invalid_message");
     const frame = packFrame(AUDIO_UPLINK, this.sequence, this.timestampUs, payload);
+    this.socket.send(frame);
     this.sequence = (this.sequence + 1) >>> 0;
     this.timestampUs += NOMINAL_CHUNK_US;
-    this.socket.send(frame);
     return frame;
   }
 
@@ -217,19 +263,63 @@ export class AvipBrowserClient {
   }
 
   close() {
-    this.socket.close();
+    if (this.state === "idle") {
+      this.state = "closed";
+      this.failure = new Error("socket closed");
+      return;
+    }
+    if (this.state !== "closed") this._fail(new Error("socket closed"));
+    this._closeSocket();
+  }
+
+  _fail(error) {
+    if (this.state === "closed") return;
+    const connecting = this.state === "connecting";
+    this.state = "closed";
+    this.failure = error;
+    if (connecting && this._rejectConnect) {
+      const rejectConnect = this._rejectConnect;
+      this._rejectConnect = null;
+      rejectConnect(error);
+    } else {
+      this._rejectConnect = null;
+    }
+    const waiters = this._waiters;
+    this._waiters = [];
+    for (const waiter of waiters) waiter.reject(error);
+  }
+
+  _closeSocket() {
+    const socket = this.socket;
+    if (!socket || socket.readyState >= 2) return;
+    try {
+      socket.close();
+    } catch {
+      // The socket is already closing.
+    }
   }
 
   _push(value) {
+    if (this.state === "closed") return;
     const waiter = this._waiters.shift();
-    if (waiter) waiter(value);
-    else this._pending.push(value);
+    if (waiter) {
+      waiter.resolve(value);
+      return;
+    }
+    if (this._pending.length >= MAX_PENDING_MESSAGES) {
+      this._fail(new Error("queue_full"));
+      this._closeSocket();
+      return;
+    }
+    this._pending.push(value);
   }
 
   _next() {
-    const queued = this._pending.shift();
-    if (queued !== undefined) return Promise.resolve(queued);
-    return new Promise((resolve) => this._waiters.push(resolve));
+    if (this._pending.length > 0) return Promise.resolve(this._pending.shift());
+    if (this.state === "closed") return Promise.reject(this.failure);
+    return new Promise((resolve, reject) => {
+      this._waiters.push({resolve, reject});
+    });
   }
 
   async _nextJson() {
@@ -241,4 +331,4 @@ export class AvipBrowserClient {
   }
 }
 
-export {AUDIO_DOWNLINK, AUDIO_UPLINK, bytesToHex, hexToBytes};
+export {AUDIO_DOWNLINK, AUDIO_UPLINK, MAX_PENDING_MESSAGES, bytesToHex, hexToBytes};

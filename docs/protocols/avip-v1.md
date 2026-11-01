@@ -277,6 +277,22 @@ as a bigint; the uint64 on the wire is the same integer. Unknown capability
 names are ordered by UTF-16 code units in both encoders, then written as UTF-8
 JSON. Omitted capability names stay omitted.
 
+Both clients advance the uplink sequence and timestamp only after the socket
+accepts the frame. Acceptance means the bytes were queued locally. It is not a
+peer acknowledgement. If send raises, the clock does not move, and the same
+sequence may be retried on that socket while it remains open. If send returns
+and the socket later closes, the frame may or may not have been delivered. Do
+not send that sequence again on that socket. M0 does not reconnect. A new
+connection is a new session and starts at sequence 0.
+
+The browser client keeps at most 8 unread messages. One more unread message
+fails that session with a local `queue_full`, is not stored, and closes the
+socket. Messages already buffered can still be read. After those, and on
+disconnect, socket error, or `close()`, every waiting receiver rejects and the
+client stays closed. The Python client does not keep its own message list. Its
+socket library pauses reading at 8 unread messages, and `recv` raises when the
+peer disconnects.
+
 Shared tests run both clients against one `/ws/avip` route: handshake,
 `session.ready`, then a media round-trip on the mock mirror. A live gateway
 started with `AVIP_MOCK_MEDIA=1` accepts `AvipClient` and `AvipBrowserClient`
