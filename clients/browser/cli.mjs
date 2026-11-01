@@ -58,6 +58,7 @@ if (command === "encode") {
       display: false,
     },
   });
+  // Node only. A browser page calls connect() and the page supplies Origin.
   await client.connect({Origin: "http://127.0.0.1:8000"});
   const ready = await client.start();
   const uplink = client.sendUplink(payload);

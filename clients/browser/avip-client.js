@@ -161,6 +161,11 @@ export class AvipBrowserClient {
     this._waiters = [];
   }
 
+  // `headers` is the Node WebSocket options bag (`new WebSocket(url, {headers})`).
+  // Conformance passes Origin there because Node has no page. A browser
+  // WebSocket's second argument is subprotocols, not headers, so a page calls
+  // `connect()` with no argument. The browser sets Origin from the page
+  // (`http://127.0.0.1:8000` or `http://localhost:8000`).
   connect(headers) {
     this.socket = headers ? new WebSocket(this.url, {headers}) : new WebSocket(this.url);
     this.socket.binaryType = "arraybuffer";
