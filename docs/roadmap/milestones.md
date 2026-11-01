@@ -34,6 +34,11 @@ Verify official Gemini SDK/model and audio/session/tool contracts and pin a test
 
 **Implementation progress:** The browser client captures a microphone, packs the existing 16 kHz PCM uplink, and plays downlink PCM. `GET /voice` is the mock-mirror demo (`AVIP_MOCK_MEDIA=1`). Uplink send watches the WebSocket byte queue and drops or closes when that queue stops draining. Local playback stop does not send a control message. Playback accepts the 16 kHz AVIP profile only; 24 kHz provider PCM has to be resampled before it is framed. Timing names (`capture-start`, `first-uplink`, `first-downlink`, `playback-start`) are recorded on a local clock. There is still no Gemini Live provider, and no measured end-to-end latency claim.
 
+**A0 spike:** [ADR-011](../adr/011-gemini-live-compatibility.md) records the
+2026-11-01 source check, the `google-genai==2.34.0` pin, and a credential-safe
+smoke harness. The provider is still unimplemented. Python sources do not embed
+a model id. JEV-23 is the integration that follows this spike. M1 is not complete.
+
 ## M2: Hermes Agent Integration (4–6 days)
 Validate actual Hermes contract; implement authenticated submit/status/results, run correlation, asynchronous progress and durable run lifecycle policy independent of voice-session disconnect.
 

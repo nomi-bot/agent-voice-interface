@@ -16,12 +16,15 @@ The current implementation supplies a Python 3.12+ FastAPI gateway, four adapter
 an asynchronous mock agent, a JSON WebSocket control protocol, tests and CI.
 The original Apache-2.0 LICENSE is preserved.
 
-**There is no Gemini connection or working Hermes integration yet.** A browser
+**There is no Gemini voice provider or working Hermes integration yet.** A browser
 page can capture a microphone and play the mock PCM mirror; that is not a voice
 provider. No full-duplex, latency or macOS runtime performance claim
 has been validated. Provider placeholders fail explicitly rather than simulating
-a successful integration. No Google SDK dependency or unverified model ID is
-introduced.
+a successful integration. The default install has no Google SDK. The optional
+`gemini-live` extra pins `google-genai==2.34.0` for the compatibility smoke in
+[ADR-011](docs/adr/011-gemini-live-compatibility.md). That smoke reads
+`GEMINI_API_KEY` and `GEMINI_LIVE_MODEL` from the environment and does not embed
+a model id.
 
 M0 is in progress. The gateway validates the AVIP v1 session handshake and serves
 it on `/ws/avip`, together with binary media frames once audio input is
@@ -48,17 +51,34 @@ git clone https://github.com/nomi-bot/agent-voice-interface.git
 cd agent-voice-interface
 python3.12 -m venv .venv
 source .venv/bin/activate
-python -m pip install -e '.[dev]'
+python -m pip install -e '.[dev,gemini-live]'
 python -m uvicorn avi.main:app --host 127.0.0.1 --port 8000 --ws-max-size 16384 --ws-max-queue 16
 ```
 
 Check `http://127.0.0.1:8000/health` or `/docs`. No credentials are needed for
-the mock. `.env.example` reserves a future server-side key; this skeleton does
-not load environment files. Never commit a populated `.env`.
+the mock. `.env.example` names the server-side key and the Live model variable.
+This skeleton does not load environment files. Never commit a populated `.env`.
 
 ```sh
 python -m unittest discover -s tests -v
 ```
+
+## Gemini Live compatibility smoke
+
+The smoke checks the pinned SDK. It opens one short Live session only when
+`GEMINI_API_KEY` and `GEMINI_LIVE_MODEL` are both set. It does not implement
+`GeminiLiveProvider`.
+
+```sh
+python -m pip install -e '.[dev,gemini-live]'
+python -m unittest tests.test_gemini_live_spike -v
+python -m avi.providers.gemini_live_spike
+```
+
+Without `GEMINI_API_KEY`, the unittest skips the network case and the module
+exits 2. With a key and no `GEMINI_LIVE_MODEL`, both fail instead of choosing
+a model. Exit 0 means a live turn completed. Model codes and the async-tool
+limits are in [ADR-011](docs/adr/011-gemini-live-compatibility.md).
 
 ## WebSocket smoke test
 
