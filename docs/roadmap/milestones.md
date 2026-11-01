@@ -19,7 +19,10 @@ Disconnect cancels the sink and drops the connection-scoped session and its
 queue. The development gateway advertises no
 capabilities unless `AVIP_MOCK_MEDIA=1`, which enables the same PCM mirror for
 every client. Legacy `/ws` is unchanged. Browser-shaped and headless Python mock
-clients pass shared conformance tests on that route. VoiceSession,
+clients pass shared conformance tests on that route. The headless SDK is the
+`avip_client` package, and the browser adapter is `clients/browser/avip-client.js`.
+Each has its own encoder. Node executes the browser encoder and the bytes match
+the Python SDK, including `session.start` and binary frames. VoiceSession,
 VoiceResponse and AgentRun state machines are implemented in core.
 `/ws/avip` records VoiceSession connecting, active and closed. Reconnect,
 voice responses, agent runs, and the remaining AVIP control and event messages

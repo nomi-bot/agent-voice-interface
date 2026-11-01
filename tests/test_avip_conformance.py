@@ -35,6 +35,7 @@ DISABLED = {
 }
 DOWNLINK = MEDIA["directions"]["audio_downlink"]
 JS_CLIENT = Path(__file__).parent / "fixtures" / "browser-avip-client.js"
+BROWSER_ADAPTER = Path(__file__).parents[1] / "clients" / "browser" / "avip-client.js"
 # 30.0 s of the M0 profile is 1500 frames × 20 ms at 16 kHz pcm_s16le.
 # Socket tests submit those frames as fast as each mirror echo returns,
 # which is faster than the media clock. The equivalent media duration is
@@ -80,11 +81,14 @@ class ConformanceTests(unittest.IsolatedAsyncioTestCase):
         nominal = bytes(MEDIA["nominal_payload_bytes"])
         self.assertEqual(len(nominal), 640)
         self.assertEqual(browser.pack_uplink(0, 0, nominal), headless.pack_uplink(0, 0, nominal))
+        adapter = BROWSER_ADAPTER.read_text()
+        self.assertIn("view.setUint32(8, sequence, true)", adapter)
+        self.assertIn("view.setBigUint64(12, timestamp, true)", adapter)
+        self.assertIn("[0x41, 0x56, 0x49, 0x50]", adapter)
+        self.assertNotIn("avi.protocols", adapter)
         script = JS_CLIENT.read_text()
         self.assertIn(MEDIA["vectors"][0]["frame_hex"], script)
-        self.assertIn("setUint32(8, sequence, true)", script)
-        self.assertIn("setBigUint64(12, BigInt(timestampUs), true)", script)
-        self.assertIn("[0x41, 0x56, 0x49, 0x50]", script)
+        self.assertNotIn("setUint32", script)
         self.assertIsNotNone(re.search(r"device_id: \"browser-demo-001\"", script))
 
     async def test_both_clients_round_trip_on_one_gateway(self):

@@ -252,22 +252,64 @@ attachment, and wire errors for media failures including `queue_full`. Still ope
 - The remaining control and event messages (`session.end`, `playback.stop`, `response.cancel`, `agent.run.cancel`, transcripts, and run status).
 
 ## Conformance
-A browser-shaped client and a headless Python client both speak this socket.
-The browser-shaped client sends JSON text and binary frames using the layout in
-[browser-avip-client.js](../../tests/fixtures/browser-avip-client.js). It does
-not call `pack_frame`. The headless client does, via `avi.protocols.media`.
-Shared tests run both against one `/ws/avip` route: handshake, `session.ready`,
-then a media round-trip on the mock mirror. Device id is only a label. M4
-validates a headless simulator and minimal ROS 2 bridge. The existing `submit`
-/ `status` / `ping` protocol remains legacy until a deliberate migration; a
-client cannot assume either socket accepts the other's messages.
+A browser client and a headless Python client both speak this socket. Device id
+is only a label. The gateway does not branch on it.
+
+The headless SDK is the `avip_client` package. It encodes frames with
+`int.to_bytes` and builds canonical `session.start` JSON. It does not import
+`avi.protocols`. The browser adapter is
+[avip-client.js](../../clients/browser/avip-client.js). It encodes frames with
+`DataView` and builds the same JSON with `JSON.stringify`. It does not import
+the Python package. The gateway encoder in `avi.protocols.media` remains a
+third implementation, used by `/ws/avip`.
+
+Conformance runs the browser file under Node. For the shared media vectors, a
+wider sweep (including sequence `2**32 - 1` and timestamp `2**64 - 1`), and the
+handshake fixtures, the browser bytes and the Python SDK bytes are equal.
+Those bytes also match the gateway encoder and the in-process test double in
+`tests/avip_clients.py`. The test double is not the browser adapter. The paste
+file [browser-avip-client.js](../../tests/fixtures/browser-avip-client.js) only
+sends one golden uplink frame from a developer console.
+
+There is no intentional wire difference between the browser adapter and
+`avip_client`. Timestamps above `2**53 - 1` are passed to the browser encoder
+as a bigint; the uint64 on the wire is the same integer. Unknown capability
+names are ordered by UTF-16 code units in both encoders, then written as UTF-8
+JSON. Omitted capability names stay omitted.
+
+Both clients advance the uplink sequence and timestamp only after the socket
+accepts the frame. Acceptance means the bytes were queued locally. It is not a
+peer acknowledgement. If send raises, the clock does not move, and the same
+sequence may be retried on that socket while it remains open. If send returns
+and the socket later closes, the frame may or may not have been delivered. Do
+not send that sequence again on that socket. M0 does not reconnect. A new
+connection is a new session and starts at sequence 0.
+
+The browser client keeps at most 8 unread messages. One more unread message
+fails that session with a local `queue_full`, is not stored, and closes the
+socket. Messages already buffered can still be read. After those, and on
+disconnect, socket error, or `close()`, every waiting receiver rejects and the
+client stays closed. The Python client does not keep its own message list. Its
+socket library pauses reading at 8 unread messages, and `recv` raises when the
+peer disconnects.
+
+Shared tests run both clients against one `/ws/avip` route: handshake,
+`session.ready`, then a media round-trip on the mock mirror. A live gateway
+started with `AVIP_MOCK_MEDIA=1` accepts `AvipClient` and `AvipBrowserClient`
+on that same path. M4 validates a headless simulator and minimal ROS 2 bridge.
+The existing `submit` / `status` / `ping` protocol remains legacy until a
+deliberate migration; a client cannot assume either socket accepts the other's
+messages.
 
 Run the suite from a Python 3.12 environment with the project installed:
 
 ```sh
 python3.12 -m unittest discover -s tests -v
-python3.12 -m unittest discover -s tests -p test_avip_conformance.py -v
+python3.12 -m unittest discover -s tests -p 'test_avip*.py' -v
 ```
+
+The SDK comparison shells out to `node` to execute the browser adapter. Node
+22 or newer is enough; the suite does not install a JavaScript package.
 
 Leave `AVIP_MOCK_MEDIA` unset for that run. The conformance tests enable the
 shared fixture's audio availability themselves. To paste the browser fixture

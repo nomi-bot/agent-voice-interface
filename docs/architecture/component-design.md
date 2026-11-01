@@ -1,7 +1,7 @@
 # Component boundaries
 Status: Proposed implementation decomposition.
 
-- **Client SDKs:** audio capture/playback, AVIP negotiation, buffering and callbacks. TypeScript browser and Python headless implementations.
+- **Client SDKs:** audio capture/playback, AVIP negotiation, buffering and callbacks. The M0 browser adapter is `clients/browser/avip-client.js`. The M0 headless implementation is the `avip_client` package. Capture, playback, and a TypeScript build are later work.
 - **Transport port:** connection setup, framed media, ordered control, event delivery and backpressure. WebSocket first.
 - **Gateway core:** session manager, correlation IDs, capability registry, event routing, media routing, agent run manager and telemetry. VoiceSession, VoiceResponse and AgentRun transitions are pure machines in `avi.core.lifecycle`. They do not open sockets.
 - **VoiceProvider port:** connect/session, inbound audio, outbound media/events, interruptions and errors. First provider candidate: Gemini Live (verify SDK/API contract).

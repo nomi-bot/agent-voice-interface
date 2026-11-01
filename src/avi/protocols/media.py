@@ -4,8 +4,9 @@ This module is transport-independent. It does not open sockets, route audio
 to a voice provider, or conceal loss. ``/ws/avip`` passes one complete binary
 message to ``unpack_frame`` and submits the result here. ``MockMediaSink``
 takes accepted uplink frames so the bounded queue can accept a continuous
-stream. Text stays on the JSON control plane. Callers must not define a
-second layout.
+stream. Text stays on the JSON control plane. The headless SDK and the
+browser adapter encode this same layout in their own modules. They do not
+call this one.
 """
 
 import asyncio

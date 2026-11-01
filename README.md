@@ -16,8 +16,8 @@ The current implementation supplies a Python 3.12+ FastAPI gateway, four adapter
 an asynchronous mock agent, a JSON WebSocket control protocol, tests and CI.
 The original Apache-2.0 LICENSE is preserved.
 
-**There is no browser audio client, Gemini connection, or working Hermes
-integration yet.** No full-duplex, latency or macOS runtime performance claim
+**There is no browser microphone or speaker path, Gemini connection, or working
+Hermes integration yet.** No full-duplex, latency or macOS runtime performance claim
 has been validated. Provider placeholders fail explicitly rather than simulating
 a successful integration. No Google SDK dependency or unverified model ID is
 introduced.
@@ -28,8 +28,9 @@ negotiated. A ready session lasts only as long as that socket; when the socket
 closes, the session id and its media queue are gone. The development gateway
 advertises no audio, camera, display, or robot capability unless
 `AVIP_MOCK_MEDIA=1`, which enables the same PCM mirror for every client. `/ws`
-still uses the legacy control protocol below. Browser-shaped and headless Python
-mock clients share `/ws/avip` in the conformance tests. A mock sink drains
+still uses the legacy control protocol below. The headless SDK (`avip_client`)
+and the browser adapter (`clients/browser/avip-client.js`) both speak `/ws/avip`.
+A mock sink drains
 accepted uplink frames on that socket. It is not a voice provider.
 VoiceSession, VoiceResponse and AgentRun transitions are implemented in core.
 `/ws/avip` records connecting, active and closed for that socket and still
@@ -122,18 +123,54 @@ environment, with `AVIP_MOCK_MEDIA` unset:
 
 ```sh
 python3.12 -m unittest discover -s tests -v
-python3.12 -m unittest discover -s tests -p test_avip_conformance.py -v
+python3.12 -m unittest discover -s tests -p 'test_avip*.py' -v
 ```
+
+The second command includes the SDK byte comparison. That comparison runs the
+browser adapter under Node. Node 22 is enough, and the suite does not install
+a JavaScript package.
 
 The conformance tests turn on the shared fixture's audio availability, drive
 both clients through handshake and a PCM round-trip, and check `queue_full` and
-other media errors. The browser-shaped client builds frames itself. The headless
-client calls `pack_frame` / `unpack_frame`.
+other media errors. The headless client is the `avip_client` package. It packs
+frames itself and can open `ws://127.0.0.1:8000/ws/avip`. The browser adapter is
+[`clients/browser/avip-client.js`](clients/browser/avip-client.js). It packs
+frames with `DataView` and does not import `avip_client`. A Node run of that
+file checks that the two encoders emit the same `session.start` text and the
+same binary frames. There is no intentional difference on the wire. The
+in-process browser double in `tests/avip_clients.py` is only a test helper.
+
+`avip_client` is the headless SDK. This speaks the same gateway without going
+through the test helper:
+
+```python
+import asyncio
+from avip_client import AvipClient
+
+async def main():
+    async with AvipClient(
+        "ws://127.0.0.1:8000/ws/avip",
+        request_id="req-python-001",
+        device_id="headless-sim-001",
+        capabilities={"audio_input": True, "audio_output": True},
+    ) as client:
+        ready = await client.start()
+        await client.send_uplink(bytes(640))
+        print(ready["session_id"], await client.recv())
+
+asyncio.run(main())
+```
+
+Leave `AVIP_MOCK_MEDIA` unset for the unit suite. Set it to `1` before this
+snippet, or `session.ready` reports every capability false and the binary frame
+closes the socket.
 
 To watch one mirrored downlink frame from a browser, start the gateway with the
 mock mirror enabled and paste
 [tests/fixtures/browser-avip-client.js](tests/fixtures/browser-avip-client.js)
-into the developer console on `http://127.0.0.1:8000`:
+into the developer console on `http://127.0.0.1:8000`. That paste sends a golden
+frame. The supported browser adapter, which the conformance test executes, is
+[clients/browser/avip-client.js](clients/browser/avip-client.js).
 
 ```sh
 AVIP_MOCK_MEDIA=1 python3.12 -m uvicorn avi.main:app --host 127.0.0.1 --port 8000 --ws-max-size 16384 --ws-max-queue 16
