@@ -301,20 +301,50 @@ The existing `submit` / `status` / `ping` protocol remains legacy until a
 deliberate migration; a client cannot assume either socket accepts the other's
 messages.
 
+### Browser capture and playback
+
+`clients/browser/voice.js` is the microphone and speaker path. It does not
+define a second frame layout. Capture is resampled to the M0 profile and cut
+into nominal 20 ms uplink frames, then `AvipBrowserClient.sendUplink` packs
+them. Downlink `audio_downlink` payloads are scheduled on a local speaker
+buffer of at most 8 nominal frames, the same depth as `MediaDelivery`. A
+capture callback that produces more than 8 frames keeps the newest 8.
+
+`stopPlayback` flushes that local buffer only. It does not write a control
+envelope, does not close the socket, and does not cancel remote agent work.
+The proposed `playback.stop` control message is still not implemented on
+`/ws/avip`. The legacy `/ws` `stop_playback` message is a different socket and
+is not used here.
+
+The development page is `GET /voice` on this gateway. The browser will prompt
+for the microphone only in a secure context (HTTPS, or `http://localhost` /
+`http://127.0.0.1`). This gateway still accepts only
+`http://127.0.0.1:8000` and `http://localhost:8000`, so the page has to be
+opened from one of those origins. Permission denial, a track that ends, and a
+socket close all stop the local capture track. Permission denial happens
+before a socket is opened.
+
+The page records four local timestamps for a later measurement pass:
+`capture-start`, `first-uplink`, `first-downlink`, and `playback-start`.
+Those values share one page clock. They are not a cross-host latency.
+
 Run the suite from a Python 3.12 environment with the project installed:
 
 ```sh
 python3.12 -m unittest discover -s tests -v
 python3.12 -m unittest discover -s tests -p 'test_avip*.py' -v
+node clients/browser/voice-check.mjs
 ```
 
 The SDK comparison shells out to `node` to execute the browser adapter. Node
 22 or newer is enough; the suite does not install a JavaScript package.
 
 Leave `AVIP_MOCK_MEDIA` unset for that run. The conformance tests enable the
-shared fixture's audio availability themselves. To paste the browser fixture
-into a page on `http://127.0.0.1:8000` and see a mirrored downlink frame, start
-the gateway with the variable set:
+shared fixture's audio availability themselves. To use the microphone and
+speaker against the mock mirror, start the gateway with the variable set and
+open `http://127.0.0.1:8000/voice`. The console paste still sends one golden
+uplink frame and does not open the microphone. To paste that fixture into a
+page on `http://127.0.0.1:8000`, start the gateway with the variable set:
 
 ```sh
 AVIP_MOCK_MEDIA=1 python3.12 -m uvicorn avi.main:app --host 127.0.0.1 --port 8000 --ws-max-size 16384 --ws-max-queue 16

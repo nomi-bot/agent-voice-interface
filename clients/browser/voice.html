@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AVI browser voice</title>
+  <style>
+    :root { color-scheme: light; }
+    body {
+      margin: 0;
+      background: #f6f4ef;
+      color: #1d1a16;
+      font: 16px/1.45 system-ui, sans-serif;
+    }
+    main { max-width: 42rem; margin: 0 auto; padding: 2rem 1.25rem 3rem; }
+    h1 { font-size: 1.6rem; font-weight: 650; margin: 0 0 0.4rem; }
+    h2 { font-size: 1.05rem; margin: 1.6rem 0 0.4rem; }
+    p { margin: 0.4rem 0; }
+    button {
+      font: inherit;
+      background: #1d1a16;
+      color: #f6f4ef;
+      border: 0;
+      border-radius: 8px;
+      padding: 0.5rem 0.9rem;
+      margin: 0 0.45rem 0.45rem 0;
+    }
+    button.secondary { background: #fff; color: #1d1a16; border: 1px solid #1d1a16; }
+    button:disabled { opacity: 0.45; }
+    .panel {
+      background: #fff;
+      border: 1px solid #e2dcd0;
+      border-radius: 10px;
+      padding: 0.85rem 1rem;
+      margin: 0.8rem 0;
+    }
+    .warn { border-color: #8d3b2f; }
+    #status { font-weight: 650; }
+    dl { display: grid; grid-template-columns: 11rem 1fr; gap: 0.25rem 0.75rem; margin: 0.4rem 0; }
+    dt { color: #5e584e; }
+    dd { margin: 0; }
+    code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.92em; }
+    ul { margin: 0.3rem 0 0.3rem 1.2rem; padding: 0; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>AVI browser voice</h1>
+    <p>Microphone capture and speaker playback for the local AVIP gateway. This page uses the existing <code>pcm_s16le</code> frames. It is not a voice model, and it does not run an agent.</p>
+
+    <div id="origin" class="panel"></div>
+
+    <div class="panel">
+      <p><strong>Permission.</strong> Start asks this page for the microphone. Samples leave the browser only as AVIP audio frames sent to this page’s own gateway. The mock sink discards uplink PCM. The mirror sends those same bytes back, and this page plays them. Nothing is written to disk.</p>
+      <p><strong>Secure context.</strong> Browsers expose the microphone only on HTTPS, or on <code>http://localhost</code> and <code>http://127.0.0.1</code>. Opening the file directly (<code>file://</code>) or from another host will not prompt. This development gateway also accepts only <code>http://127.0.0.1:8000</code> and <code>http://localhost:8000</code>.</p>
+      <p><strong>Headphones.</strong> The mock path plays your microphone back through the speakers. Headphones keep that echo from feeding into the mic.</p>
+    </div>
+
+    <p>
+      <button id="start" type="button">Start microphone</button>
+      <button id="stop-playback" type="button" class="secondary" disabled>Stop playback</button>
+      <button id="end" type="button" class="secondary" disabled>End session</button>
+    </p>
+    <div id="status-panel" class="panel">
+      <p id="status" role="status" aria-live="polite">Idle. Press Start to request the microphone.</p>
+    </div>
+
+    <h2>Session</h2>
+    <dl>
+      <dt>Uplink frames</dt><dd id="uplink">0</dd>
+      <dt>Downlink frames</dt><dd id="downlink">0</dd>
+      <dt>Played frames</dt><dd id="played">0</dd>
+      <dt>Capture drops</dt><dd id="capture-drops">0</dd>
+      <dt>Playback drops</dt><dd id="playback-drops">0</dd>
+    </dl>
+
+    <h2>Timing hooks</h2>
+    <p>Local clock only. These names are the hooks a later measurement pass can formalize. They are not a cross-host latency result.</p>
+    <dl id="metrics">
+      <dt>capture-start</dt><dd>—</dd>
+      <dt>first-uplink</dt><dd>—</dd>
+      <dt>first-downlink</dt><dd>—</dd>
+      <dt>playback-start</dt><dd>—</dd>
+    </dl>
+
+    <h2>Manual checks</h2>
+    <ul>
+      <li>Deny the microphone prompt. The page reports permission denied and does not keep a capture track. No session is opened.</li>
+      <li>Allow the microphone, then press Stop playback. Uplink frames keep increasing, the speaker goes quiet, and the session stays open. That button does not send a cancel.</li>
+      <li>Unplug the headset or stop the browser’s microphone. The page reports that the track ended, capture stops, and the session stays open until you end it or the socket closes.</li>
+      <li>Stop the gateway. The page reports the disconnect and releases the microphone.</li>
+      <li>Start the gateway without <code>AVIP_MOCK_MEDIA=1</code>. The page reports that audio was not negotiated and releases the microphone.</li>
+    </ul>
+  </main>
+  <script type="module">
+    import {AvipBrowserClient} from "/voice/avip-client.js";
+    import {BrowserVoice, developmentGatewayOrigin, secureContext, VOICE_METRICS} from "/voice/voice.js";
+
+    const startButton = document.querySelector("#start");
+    const stopPlaybackButton = document.querySelector("#stop-playback");
+    const endButton = document.querySelector("#end");
+    const statusNode = document.querySelector("#status");
+    const statusPanel = document.querySelector("#status-panel");
+    const originNode = document.querySelector("#origin");
+
+    const gate = secureContext(location);
+    const gateway = developmentGatewayOrigin(location);
+    if (!gate.ok) {
+      originNode.classList.add("warn");
+      originNode.textContent = gate.message;
+      startButton.disabled = true;
+    } else if (!gateway) {
+      originNode.classList.add("warn");
+      originNode.textContent = "This page can use the microphone here, but this development gateway only accepts http://127.0.0.1:8000 and http://localhost:8000. Open /voice on that gateway.";
+      startButton.disabled = true;
+    } else {
+      originNode.textContent = `Origin ${location.origin} is a localhost secure context this gateway accepts.`;
+    }
+
+    let voice = null;
+
+    function render() {
+      const stats = voice ? voice.stats : null;
+      document.querySelector("#uplink").textContent = stats ? String(stats.uplinkFrames) : "0";
+      document.querySelector("#downlink").textContent = stats ? String(stats.downlinkFrames) : "0";
+      document.querySelector("#played").textContent = stats ? String(stats.playbackFrames) : "0";
+      document.querySelector("#capture-drops").textContent = stats ? String(stats.captureDrops) : "0";
+      document.querySelector("#playback-drops").textContent = stats ? String(stats.playbackDrops) : "0";
+      const base = voice && voice.metrics["capture-start"];
+      const rows = VOICE_METRICS.map((name) => {
+        const at = voice && Object.prototype.hasOwnProperty.call(voice.metrics, name) ? voice.metrics[name] : null;
+        const value = at == null ? "—" : (base == null ? `${at.toFixed(1)} ms` : `${(at - base).toFixed(1)} ms after capture-start`);
+        return `<dt>${name}</dt><dd>${value}</dd>`;
+      });
+      document.querySelector("#metrics").innerHTML = rows.join("");
+    }
+
+    function setStatus(text, warn) {
+      statusNode.textContent = text;
+      statusPanel.classList.toggle("warn", Boolean(warn));
+    }
+
+    function describe(name, detail) {
+      if (detail && detail.message) return detail.message;
+      if (name === "requesting-permission") return "Requesting microphone permission…";
+      if (name === "connecting") return "Microphone is live. Opening the AVIP session…";
+      if (name === "live") return "Live. Microphone audio is going to the gateway, and mirrored audio is playing here. Use headphones.";
+      if (name === "avip-error") return "The gateway reported a media error. The page is still listening.";
+      return name;
+    }
+
+    const warnings = new Set([
+      "permission-denied",
+      "insecure-origin",
+      "device-ended",
+      "disconnected",
+      "audio-unavailable",
+      "capture-failed",
+      "playback-failed",
+    ]);
+
+    function resetButtons() {
+      startButton.disabled = !gate.ok || !gateway;
+      stopPlaybackButton.disabled = true;
+      endButton.disabled = true;
+    }
+
+    startButton.addEventListener("click", async () => {
+      startButton.disabled = true;
+      const session = new BrowserVoice({
+        onMetric() { render(); },
+        onStats() { render(); },
+        onStatus(name, detail) {
+          setStatus(describe(name, detail), warnings.has(name));
+          render();
+          if (name === "disconnected" || name === "ended" || name === "audio-unavailable") resetButtons();
+        },
+      });
+      voice = session;
+      try {
+        await session.start({
+          connect: async () => {
+            const suffix = globalThis.crypto && crypto.randomUUID ? crypto.randomUUID() : String(Date.now());
+            const client = new AvipBrowserClient({
+              url: `ws://${location.host}/ws/avip`,
+              requestId: `req-${suffix}`.slice(0, 128),
+              deviceId: "browser-voice-001",
+              capabilities: {
+                audio_input: true,
+                audio_output: true,
+                camera: false,
+                display: false,
+                robot_actions: false,
+              },
+            });
+            try {
+              await client.connect();
+              const ready = await client.start();
+              return {client, ready};
+            } catch (error) {
+              client.close();
+              throw error;
+            }
+          },
+        });
+        stopPlaybackButton.disabled = false;
+        endButton.disabled = false;
+        render();
+      } catch (error) {
+        setStatus(error.message || "The voice session did not start.", true);
+        resetButtons();
+      }
+    });
+
+    stopPlaybackButton.addEventListener("click", () => {
+      if (!voice) return;
+      voice.stopPlayback();
+      stopPlaybackButton.disabled = true;
+      render();
+    });
+
+    endButton.addEventListener("click", async () => {
+      endButton.disabled = true;
+      stopPlaybackButton.disabled = true;
+      const session = voice;
+      if (session) await session.stop();
+      resetButtons();
+      render();
+    });
+
+    render();
+  </script>
+</body>
+</html>
