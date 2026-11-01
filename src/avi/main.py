@@ -2,8 +2,10 @@
 import os
 from collections.abc import Mapping
 from contextlib import asynccontextmanager
+from pathlib import Path
 
-from fastapi import FastAPI, WebSocket
+from fastapi import FastAPI, HTTPException, WebSocket
+from fastapi.responses import FileResponse
 
 from avi.agents.mock import MockAgentAdapter
 from avi.core.avip_session import AvipSession
@@ -21,6 +23,23 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="AVI development gateway", lifespan=lifespan)
 ALLOWED_ORIGINS = {"http://localhost:8000", "http://127.0.0.1:8000"}
 SESSION_LIMITS = SessionLimits()
+# Development demo only. The directory is the source tree next to this package,
+# not a general file server. Names below are the only files the route reads.
+_BROWSER_DIR = Path(__file__).resolve().parents[2] / "clients" / "browser"
+_VOICE_ASSETS = {
+    "avip-client.js": "text/javascript",
+    "pcm.js": "text/javascript",
+    "voice.js": "text/javascript",
+    "capture-worklet.js": "text/javascript",
+}
+_VOICE_HEADERS = {"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"}
+
+
+def _browser_file(name: str) -> Path:
+    path = (_BROWSER_DIR / name).resolve()
+    if path.parent != _BROWSER_DIR.resolve() or not path.is_file():
+        raise HTTPException(status_code=404)
+    return path
 
 
 def development_capabilities(environ: Mapping[str, str] | None = None) -> Capabilities:
@@ -43,6 +62,32 @@ AVIP_CAPABILITIES = development_capabilities()
 @app.get("/health")
 async def health():
     return {"status": "ok", "voice": "not_implemented", "agent": "mock"}
+
+
+@app.get("/voice")
+async def voice_demo():
+    """Serve the local microphone and speaker page.
+
+    The page is a development client for ``/ws/avip``. It is not a voice
+    provider. ``AVIP_MOCK_MEDIA=1`` is what negotiates the PCM mirror.
+    """
+    return FileResponse(
+        _browser_file("voice.html"),
+        media_type="text/html; charset=utf-8",
+        headers=_VOICE_HEADERS,
+    )
+
+
+@app.get("/voice/{asset}")
+async def voice_asset(asset: str):
+    media_type = _VOICE_ASSETS.get(asset)
+    if media_type is None:
+        raise HTTPException(status_code=404)
+    return FileResponse(
+        _browser_file(asset),
+        media_type=f"{media_type}; charset=utf-8",
+        headers=_VOICE_HEADERS,
+    )
 
 
 @app.websocket("/ws")

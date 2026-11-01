@@ -32,6 +32,8 @@ are not on that socket. M0 is not complete.
 Verify official Gemini SDK/model and audio/session/tool contracts and pin a tested SDK range; implement Gemini Live provider, browser mic/speaker and binary audio transport, format/resampling/buffering, session/errors and measurement instrumentation.
 **Exit:** browser can converse via AVI; record empirical latency, recovery and format evidence.
 
+**Implementation progress:** The browser client captures a microphone, packs the existing 16 kHz PCM uplink, and plays downlink PCM. `GET /voice` is the mock-mirror demo (`AVIP_MOCK_MEDIA=1`). Uplink send watches the WebSocket byte queue and drops or closes when that queue stops draining. Local playback stop does not send a control message. Playback accepts the 16 kHz AVIP profile only; 24 kHz provider PCM has to be resampled before it is framed. Timing names (`capture-start`, `first-uplink`, `first-downlink`, `playback-start`) are recorded on a local clock. There is still no Gemini Live provider, and no measured end-to-end latency claim.
+
 ## M2: Hermes Agent Integration (4–6 days)
 Validate actual Hermes contract; implement authenticated submit/status/results, run correlation, asynchronous progress and durable run lifecycle policy independent of voice-session disconnect.
 

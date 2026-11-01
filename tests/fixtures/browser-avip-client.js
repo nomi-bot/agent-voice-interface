@@ -4,8 +4,10 @@
 // mirror; otherwise session.ready reports every capability false and a binary
 // frame closes the socket.
 //
-// This paste sends one golden uplink frame. It does not encode frames. The
-// browser adapter and its serializer are clients/browser/avip-client.js.
+// This paste sends one golden uplink frame. It does not encode frames and it
+// does not open the microphone. The browser adapter is
+// clients/browser/avip-client.js. The microphone and speaker page is
+// http://127.0.0.1:8000/voice when the gateway is started with AVIP_MOCK_MEDIA=1.
 
 const GOLDEN_UPLINK_HEX = "41564950010101000000000000000000000000000400000000000000";
 

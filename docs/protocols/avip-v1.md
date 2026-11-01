@@ -301,20 +301,71 @@ The existing `submit` / `status` / `ping` protocol remains legacy until a
 deliberate migration; a client cannot assume either socket accepts the other's
 messages.
 
+### Browser capture and playback
+
+`clients/browser/voice.js` is the microphone and speaker path. It does not
+define a second frame layout. Capture is resampled to the M0 profile and cut
+into nominal 20 ms uplink frames, then `AvipBrowserClient.sendUplink` packs
+them. Downlink `audio_downlink` payloads are scheduled on a local speaker
+buffer of at most 8 nominal frames, the same depth as `MediaDelivery`. A
+capture callback that produces more than 8 frames keeps the newest 8.
+
+The uplink also watches `WebSocket.bufferedAmount`. The budget is 8 nominal
+frames including the 24-byte header (5312 bytes). A new frame that would pass
+that budget is not sent, the uplink sequence does not advance, and
+`transmitDrops` counts it. A missing budget, or a queue already twice that
+size, closes the socket and stops capture. That close is local. It does not
+send a cancel. The per-callback trim is not this budget: frames already
+accepted by `send` stay in the browser send queue until the socket drains.
+
+`connect(lease)` must call `lease.adopt(client)` as soon as the WebSocket
+exists, before the handshake. If that function throws afterward, the voice
+session closes the adopted client and stops the microphone. Returning
+`{client, ready}` transfers the same ownership. A connector that opens a
+socket and throws without `adopt` still owns that socket.
+
+AVIP version 1 downlink is 16 kHz. The speaker refuses any other declared
+rate instead of playing those bytes on a 16 kHz buffer. Gemini Live output is
+24 kHz. That rate is not this profile. `resampleS16leToAvip` is the conversion
+a future provider has to run before it packs an AVIP downlink frame. The mock
+mirror is already 16 kHz, and this demo does not perform that provider
+conversion.
+
+`stopPlayback` flushes that local buffer only. It does not write a control
+envelope, does not close the socket, and does not cancel remote agent work.
+The proposed `playback.stop` control message is still not implemented on
+`/ws/avip`. The legacy `/ws` `stop_playback` message is a different socket and
+is not used here.
+
+The development page is `GET /voice` on this gateway. The browser will prompt
+for the microphone only in a secure context (HTTPS, or `http://localhost` /
+`http://127.0.0.1`). This gateway still accepts only
+`http://127.0.0.1:8000` and `http://localhost:8000`, so the page has to be
+opened from one of those origins. Permission denial, a track that ends, and a
+socket close all stop the local capture track. Permission denial happens
+before a socket is opened.
+
+The page records four local timestamps for a later measurement pass:
+`capture-start`, `first-uplink`, `first-downlink`, and `playback-start`.
+Those values share one page clock. They are not a cross-host latency.
+
 Run the suite from a Python 3.12 environment with the project installed:
 
 ```sh
 python3.12 -m unittest discover -s tests -v
 python3.12 -m unittest discover -s tests -p 'test_avip*.py' -v
+node clients/browser/voice-check.mjs
 ```
 
 The SDK comparison shells out to `node` to execute the browser adapter. Node
 22 or newer is enough; the suite does not install a JavaScript package.
 
 Leave `AVIP_MOCK_MEDIA` unset for that run. The conformance tests enable the
-shared fixture's audio availability themselves. To paste the browser fixture
-into a page on `http://127.0.0.1:8000` and see a mirrored downlink frame, start
-the gateway with the variable set:
+shared fixture's audio availability themselves. To use the microphone and
+speaker against the mock mirror, start the gateway with the variable set and
+open `http://127.0.0.1:8000/voice`. The console paste still sends one golden
+uplink frame and does not open the microphone. To paste that fixture into a
+page on `http://127.0.0.1:8000`, start the gateway with the variable set:
 
 ```sh
 AVIP_MOCK_MEDIA=1 python3.12 -m uvicorn avi.main:app --host 127.0.0.1 --port 8000 --ws-max-size 16384 --ws-max-queue 16

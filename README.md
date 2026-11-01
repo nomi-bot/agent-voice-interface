@@ -16,8 +16,9 @@ The current implementation supplies a Python 3.12+ FastAPI gateway, four adapter
 an asynchronous mock agent, a JSON WebSocket control protocol, tests and CI.
 The original Apache-2.0 LICENSE is preserved.
 
-**There is no browser microphone or speaker path, Gemini connection, or working
-Hermes integration yet.** No full-duplex, latency or macOS runtime performance claim
+**There is no Gemini connection or working Hermes integration yet.** A browser
+page can capture a microphone and play the mock PCM mirror; that is not a voice
+provider. No full-duplex, latency or macOS runtime performance claim
 has been validated. Provider placeholders fail explicitly rather than simulating
 a successful integration. No Google SDK dependency or unverified model ID is
 introduced.
@@ -30,7 +31,8 @@ advertises no audio, camera, display, or robot capability unless
 `AVIP_MOCK_MEDIA=1`, which enables the same PCM mirror for every client. `/ws`
 still uses the legacy control protocol below. The headless SDK (`avip_client`)
 and the browser adapter (`clients/browser/avip-client.js`) both speak `/ws/avip`.
-A mock sink drains
+`clients/browser/voice.js` captures microphone audio into that same uplink frame
+and plays downlink PCM. A mock sink drains
 accepted uplink frames on that socket. It is not a voice provider.
 VoiceSession, VoiceResponse and AgentRun transitions are implemented in core.
 `/ws/avip` records connecting, active and closed for that socket and still
@@ -165,16 +167,42 @@ Leave `AVIP_MOCK_MEDIA` unset for the unit suite. Set it to `1` before this
 snippet, or `session.ready` reports every capability false and the binary frame
 closes the socket.
 
-To watch one mirrored downlink frame from a browser, start the gateway with the
-mock mirror enabled and paste
-[tests/fixtures/browser-avip-client.js](tests/fixtures/browser-avip-client.js)
-into the developer console on `http://127.0.0.1:8000`. That paste sends a golden
-frame. The supported browser adapter, which the conformance test executes, is
-[clients/browser/avip-client.js](clients/browser/avip-client.js).
+To hear the microphone come back through the speakers, start the gateway with
+the mock mirror enabled and open the voice page on that same origin. Use
+headphones. The page asks for microphone permission, sends 20 ms PCM uplink
+frames, and plays the mirrored 16 kHz downlink. Gemini Live’s 24 kHz output is
+not this profile and is not played as 16 kHz. **Stop playback** flushes only the
+local speaker. It does not send a control message and it does not close the
+session. If the WebSocket send queue reaches 8 unsent nominal frames, later
+microphone frames are dropped and counted. A queue with no byte budget closes
+the socket and releases the microphone. The page adopts the socket before the
+handshake, so a failed handshake closes it too.
 
 ```sh
 AVIP_MOCK_MEDIA=1 python3.12 -m uvicorn avi.main:app --host 127.0.0.1 --port 8000 --ws-max-size 16384 --ws-max-queue 16
 ```
+
+Open `http://127.0.0.1:8000/voice` (or `http://localhost:8000/voice` if that is
+the host you bound). `file://` and any other origin cannot use this page: the
+microphone needs a secure context, and the gateway only accepts those two
+origins. Leave `AVIP_MOCK_MEDIA` unset and the page reports that audio was not
+negotiated.
+
+The one-frame console paste is still
+[tests/fixtures/browser-avip-client.js](tests/fixtures/browser-avip-client.js).
+It does not open the microphone. The serializer the conformance test executes
+is [clients/browser/avip-client.js](clients/browser/avip-client.js). Capture and
+playback are [clients/browser/voice.js](clients/browser/voice.js).
+
+Browser checks that do not need a microphone:
+
+```sh
+node clients/browser/voice-check.mjs
+```
+
+`python3.12 -m unittest discover -s tests -v` runs that file. The manual
+negative paths (permission denied, unplug, gateway stop) are listed on the
+voice page.
 
 That variable is exact: only `1` enables audio input and audio output. It does
 not enable a voice provider or robot actions. The mirror copies PCM into a
@@ -187,7 +215,10 @@ stays open, and the refused frame keeps its sequence.
 ## Security and integration boundaries
 
 Bind to loopback only. Both `/ws` and `/ws/avip` check exact localhost origins on
-port 8000; this is defense in depth, **not authentication**. Do not expose the
+port 8000; this is defense in depth, **not authentication**. `GET /voice` is the
+local microphone demo on that same origin. It requests microphone permission in
+the browser and sends PCM only to that gateway. Stopping playback does not send
+a cancel. Do not expose the
 development service through a proxy or bind it remotely. Mock requests execute no tools.
 Future agent integrations must retain their own authorisation and approval
 controls. Treat voice transcripts and tool arguments as untrusted input.

@@ -1,5 +1,7 @@
 // Browser AVIP v1 adapter for /ws/avip.
 // Load it as a module. It does not import the gateway or the headless package.
+// Microphone capture and speaker playback are voice.js. This file stays the
+// serializer and the socket client.
 // packFrame and encodeSessionStart are the browser serializer. Conformance
 // runs this file under Node and compares the bytes with the Python SDK.
 //
