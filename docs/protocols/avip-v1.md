@@ -2,10 +2,12 @@
 Status: **Draft — `/ws/avip` serves the session handshake and, once audio
 input is negotiated, binary media frames. The development gateway advertises
 no capabilities unless `AVIP_MOCK_MEDIA=1`, which enables the M0 PCM mirror
-for every client. The remaining control and event messages, and the
-VoiceSession / VoiceResponse / AgentRun state machines, are not implemented.
-`/ws/avip` is not wire-compatible with the legacy `/ws` JSON control protocol.
-M0 is not complete.**
+for every client. VoiceSession, VoiceResponse and AgentRun transitions live
+in `avi.core.lifecycle`. This socket uses VoiceSession for connecting, active
+and closed only. It does not enter reconnecting, and it does not create a
+voice response or an agent run. The remaining control and event messages are
+not implemented. `/ws/avip` is not wire-compatible with the legacy `/ws` JSON
+control protocol. M0 is not complete.**
 
 ## Intent
 A device-neutral contract with (1) media frames, (2) control commands, (3) asynchronous events. WebSocket is first transport; future transports must preserve semantics without dictating wire framing.
@@ -115,9 +117,9 @@ these envelopes under `wire_errors`.
 ### Connection lifecycle
 
 1. After the origin check, the server accepts the socket and waits for the first frame. Silence until the shared session idle limit (currently 300 seconds) closes with code 1001 and reason `Idle timeout`. No session is allocated. A binary first frame is rejected as in step 7 and is not decoded.
-2. A valid `session.start` allocates a new session id, negotiates capabilities against support the process actually has enabled, and sends `session.ready`. The id is stored only on that connection.
+2. A valid `session.start` allocates a new session id, negotiates capabilities against support the process actually has enabled, and sends `session.ready`. The id is stored only on that connection. After `session.ready` has been sent, the connection's VoiceSession moves from `connecting` to `active`.
 3. The socket stays ready until it ends. This path has no agent run and no voice response. It does keep a connection-scoped media queue once the session is ready. `active_sessions` counts accepted sockets on `/ws` and `/ws/avip` in this process. It is not a session table.
-4. Disconnect, idle timeout, or a fatal protocol close drops the id and the queue. Nothing is written to disk. A later connection starts over with `session_id: null` and receives a new id. The previous id is not a lookup key. Legacy `/ws` mock runs stay on their own sockets and still end when those sockets end. `/ws/avip` does not cancel, persist or resume them.
+4. Disconnect, idle timeout, or a fatal protocol close drops the id and the queue and moves that VoiceSession through `closing` to `closed`. Peer disconnect and idle timeout (close 1001) record `disconnected`. Protocol and send failures (1002, 1003, 1013) record `failed`. The machine does not enter `reconnecting`. Nothing is written to disk. A later connection starts over with `session_id: null` and receives a new id. The previous id is not a lookup key. Legacy `/ws` mock runs stay on their own sockets and still end when those sockets end. `/ws/avip` does not cancel, persist or resume them. The allowed edges are in the [lifecycle guide](../architecture/session-lifecycle.md).
 5. A second JSON object whose `type` is `session.start` is `session_already_started`, whatever the other fields contain. The driver does not parse it as a new session and does not replace the id. It then closes the socket.
 6. Any other failure of the first frame closes the socket. A retry is a new connection.
 7. Text that is not a JSON object is `invalid_message` and closes with code 1002 and reason `Protocol error`. A binary frame before `session.ready`, or any binary frame when `audio_input` was not negotiated, is `invalid_message` and closes with code 1003 and reason `Unsupported data`. Those bytes are not decoded, stored, or forwarded.
@@ -234,7 +236,7 @@ attachment, and wire errors for media failures including `queue_full`. Still ope
 - Trace context beyond the media clock defined above, and a way to measure
   cross-host latency without subtracting unsynchronized clocks.
 - Status/progress model for ROS 2 actions and cancellation acknowledgments.
-- VoiceSession, VoiceResponse and AgentRun state machines beyond this connection's start, ready, media, and closed rules.
+- Driving VoiceResponse, AgentRun, or VoiceSession `reconnecting` from this socket. The state contracts themselves are implemented in `avi.core.lifecycle`. This connection uses VoiceSession for `connecting`, `active` and `closed` only.
 - The remaining control and event messages (`session.end`, `playback.stop`, `response.cancel`, `agent.run.cancel`, transcripts, and run status).
 
 ## Conformance

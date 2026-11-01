@@ -4,6 +4,12 @@ A session id exists only while its WebSocket is open. Disconnect discards it.
 This path does not construct an agent, submit a run, or retain anything that
 a later connection could resume.
 
+The connection's VoiceSession moves connecting → active when ``session.ready``
+has been sent, and active or connecting → closing → closed when the socket
+ends. Peer disconnect and idle timeout record ``disconnected``. Protocol and
+send failures record ``failed``. This driver does not enter ``reconnecting``
+and does not create a VoiceResponse or an AgentRun.
+
 After ``session.ready``, text frames stay on the JSON control plane. One binary
 message is one media frame, passed through ``unpack_frame``. The same driver
 handles every device label.
@@ -12,6 +18,7 @@ import asyncio
 import secrets
 from typing import NoReturn, Protocol
 
+from avi.core.lifecycle import SessionCloseReason, VoiceSession, VoiceSessionState
 from avi.core.session import SessionLimits
 from avi.protocols.avip import (
     Capabilities,
@@ -64,6 +71,20 @@ class _SessionEnd(Exception):
         self.reason = reason
 
 
+# Local closes that mean the handshake or the socket failed. Idle (1001) and a
+# peer drop are disconnects, not failures. Any other local close stays a
+# failure so a new code cannot be recorded as a clean disconnect.
+_FAILURE_CLOSE_CODES = frozenset({1002, 1003, 1013})
+
+
+def _session_close_reason(ending: _SessionEnd | None) -> SessionCloseReason:
+    if ending is not None and ending.code in _FAILURE_CLOSE_CODES:
+        return SessionCloseReason.FAILED
+    if ending is None or ending.code == 1001:
+        return SessionCloseReason.DISCONNECTED
+    return SessionCloseReason.FAILED
+
+
 class AvipSession:
     def __init__(self, transport: AvipTransport, limits: SessionLimits,
                  available: Capabilities):
@@ -73,6 +94,7 @@ class AvipSession:
         self.session_id: str | None = None
         self.negotiated: Capabilities | None = None
         self.delivery: MediaDelivery | None = None
+        self.voice_session = VoiceSession()
         self._downlink_sequence = 0
         self._downlink_timestamp = 0
 
@@ -120,6 +142,11 @@ class AvipSession:
         self.session_id = ready["session_id"]
         self.negotiated = Capabilities(**ready["capabilities"])
         self.delivery = MediaDelivery()
+        self.voice_session.activate(
+            ready["session_id"],
+            request_id=start.request_id,
+            device_id=start.device_id,
+        )
 
     async def _on_media(self, data: bytes) -> None:
         """Queue one uplink frame and, when output was negotiated, mirror it.
@@ -180,6 +207,12 @@ class AvipSession:
                 )
             await self._send(error_envelope(ProtocolError("unsupported_message_type", "type")))
 
+    def _end_voice_session(self, ending: _SessionEnd | None) -> None:
+        """Record the socket outcome on the voice session, if it is still open."""
+        if self.voice_session.state is VoiceSessionState.CLOSED:
+            return
+        self.voice_session.cleanup(_session_close_reason(ending))
+
     async def run(self) -> None:
         ending = None
         try:
@@ -191,12 +224,15 @@ class AvipSession:
             except TransportDisconnected:
                 pass
         finally:
-            self.session_id = None
-            self.negotiated = None
-            self.delivery = None
-            if ending is not None:
-                try:
-                    async with asyncio.timeout(self.limits.send_timeout):
-                        await self.transport.close(ending.code, ending.reason)
-                except (TimeoutError, TransportDisconnected):
-                    pass
+            try:
+                self._end_voice_session(ending)
+            finally:
+                self.session_id = None
+                self.negotiated = None
+                self.delivery = None
+                if ending is not None:
+                    try:
+                        async with asyncio.timeout(self.limits.send_timeout):
+                            await self.transport.close(ending.code, ending.reason)
+                    except (TimeoutError, TransportDisconnected):
+                        pass

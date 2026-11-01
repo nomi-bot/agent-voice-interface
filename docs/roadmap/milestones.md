@@ -16,9 +16,11 @@ socket open; other media `ProtocolError`s close it. Disconnect drops the
 connection-scoped session and its queue. The development gateway advertises no
 capabilities unless `AVIP_MOCK_MEDIA=1`, which enables the same PCM mirror for
 every client. Legacy `/ws` is unchanged. Browser-shaped and headless Python mock
-clients pass shared conformance tests on that route. The remaining AVIP control
-and event messages, and the VoiceSession / VoiceResponse / AgentRun state
-machines, remain. M0 is not complete.
+clients pass shared conformance tests on that route. VoiceSession,
+VoiceResponse and AgentRun state machines are implemented in core.
+`/ws/avip` records VoiceSession connecting, active and closed. Reconnect,
+voice responses, agent runs, and the remaining AVIP control and event messages
+are not on that socket. M0 is not complete.
 
 ## M1: Real-Time Voice Streaming (5–7 days)
 Verify official Gemini SDK/model and audio/session/tool contracts and pin a tested SDK range; implement Gemini Live provider, browser mic/speaker and binary audio transport, format/resampling/buffering, session/errors and measurement instrumentation.

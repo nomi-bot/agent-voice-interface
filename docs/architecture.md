@@ -41,6 +41,13 @@ Durable runs require explicit ownership, storage and reconnection policy. All
 [M2 exit gates](roadmap/milestones.md#m2-exit-gates) must pass before that behavior
 can replace the current session-owned policy.
 
+`avi.core.lifecycle` is the VoiceSession, VoiceResponse and AgentRun contract.
+Illegal edges fail closed. Playback stop, response interrupt, response failure,
+run cancellation and run failure are different operations, and closing a
+VoiceSession does not cancel an AgentRun. `/ws/avip` records connecting, active
+and closed on that machine. It does not enter reconnecting and does not create
+a response or a run. The legacy `/ws` mock is unchanged.
+
 ## Protocol (initial control plane)
 
 Client JSON objects: submit(request), status(run_id), cancel_task(run_id), ping,
