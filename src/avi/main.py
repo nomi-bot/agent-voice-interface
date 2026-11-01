@@ -30,6 +30,7 @@ _VOICE_ASSETS = {
     "avip-client.js": "text/javascript",
     "pcm.js": "text/javascript",
     "voice.js": "text/javascript",
+    "telemetry.js": "text/javascript",
     "capture-worklet.js": "text/javascript",
 }
 _VOICE_HEADERS = {"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"}
