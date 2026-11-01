@@ -1,15 +1,17 @@
-"""Mock AVIP clients that share one gateway.
+"""In-process AVIP clients that share one gateway.
 
-``BrowserShapedClient`` builds JSON text and binary frames the way the browser
-fixture does. It does not call ``unpack_frame`` or ``pack_frame``.
-``HeadlessPythonClient`` is the Python SDK path and calls those functions.
-Neither client selects a gateway route.
+``BrowserShapedClient`` is a test double. It builds JSON text and binary frames
+with ``struct`` and does not call the gateway or ``avip_client``. The browser
+adapter itself is ``clients/browser/avip-client.js``.
+
+``HeadlessPythonClient`` is the installed headless SDK, ``avip_client``. It does
+not call ``avi.protocols.media``. Neither client selects a gateway route.
 """
 import json
 from pathlib import Path
 import struct
 
-from avi.protocols.media import Direction, MediaFrame, pack_frame, unpack_frame
+from avip_client import pack_frame, unpack_frame
 
 
 _FIXTURES = Path(__file__).parent / "fixtures"
@@ -19,7 +21,12 @@ _HEADER = struct.Struct("<4sBBBBIQI")
 
 
 class BrowserShapedClient:
-    """Text JSON plus one binary frame per chunk, matching browser-avip-client.js."""
+    """Text JSON plus one binary frame per chunk.
+
+    The layout matches the browser adapter. This class is the in-process stand-in
+    used by the gateway tests. Byte identity with the adapter is checked by
+    running ``clients/browser/avip-client.js``.
+    """
 
     kind = "browser"
 
@@ -31,17 +38,20 @@ class BrowserShapedClient:
         self.sequence = 0
         self.timestamp_us = 0
 
-    def pack_uplink(self, sequence: int, timestamp_us: int, payload: bytes) -> bytes:
+    def pack(self, direction: int, sequence: int, timestamp_us: int, payload: bytes) -> bytes:
         return _HEADER.pack(
             bytes.fromhex(MEDIA["magic_hex"]),
             MEDIA["version"],
-            MEDIA["directions"]["audio_uplink"],
+            direction,
             MEDIA["codec"]["id"],
             0,
             sequence,
             timestamp_us,
             len(payload),
         ) + payload
+
+    def pack_uplink(self, sequence: int, timestamp_us: int, payload: bytes) -> bytes:
+        return self.pack(MEDIA["directions"]["audio_uplink"], sequence, timestamp_us, payload)
 
     def next_uplink(self, payload: bytes) -> bytes:
         raw = self.pack_uplink(self.sequence, self.timestamp_us, payload)
@@ -73,7 +83,7 @@ class BrowserShapedClient:
 
 
 class HeadlessPythonClient:
-    """Headless client. Framing goes through avi.protocols.media."""
+    """Headless client. Framing goes through ``avip_client``."""
 
     kind = "headless"
 
@@ -86,9 +96,9 @@ class HeadlessPythonClient:
         self.timestamp_us = 0
 
     def pack_uplink(self, sequence: int, timestamp_us: int, payload: bytes) -> bytes:
-        return pack_frame(MediaFrame(
-            Direction.AUDIO_UPLINK, sequence, timestamp_us, payload
-        ))
+        return pack_frame(
+            MEDIA["directions"]["audio_uplink"], sequence, timestamp_us, payload
+        )
 
     def next_uplink(self, payload: bytes) -> bytes:
         raw = self.pack_uplink(self.sequence, self.timestamp_us, payload)
@@ -105,24 +115,24 @@ def both_clients():
 
 
 def payload_of(decoded) -> bytes:
-    if isinstance(decoded, MediaFrame):
-        return decoded.payload
-    return decoded["payload"]
+    if isinstance(decoded, dict):
+        return decoded["payload"]
+    return decoded.payload
 
 
 def direction_of(decoded) -> int:
-    if isinstance(decoded, MediaFrame):
-        return int(decoded.direction)
-    return decoded["direction"]
+    if isinstance(decoded, dict):
+        return decoded["direction"]
+    return int(decoded.direction)
 
 
 def sequence_of(decoded) -> int:
-    if isinstance(decoded, MediaFrame):
-        return decoded.sequence
-    return decoded["sequence"]
+    if isinstance(decoded, dict):
+        return decoded["sequence"]
+    return decoded.sequence
 
 
 def timestamp_of(decoded) -> int:
-    if isinstance(decoded, MediaFrame):
-        return decoded.timestamp_us
-    return decoded["timestamp_us"]
+    if isinstance(decoded, dict):
+        return decoded["timestamp_us"]
+    return decoded.timestamp_us
