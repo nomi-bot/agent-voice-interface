@@ -1,6 +1,6 @@
 # ADR-011: Gemini Live API compatibility
 
-**Status:** Proposed. This records the M1/A0 spike. It does not implement a voice provider.
+**Status:** Proposed. This records the M1/A0 spike. JEV-23 later added `GeminiLiveProvider` on the existing `VoiceProvider` port. That adapter does not change the measurements below. Its interface, tool handshake, and resampling notes are in [the provider record](../providers/gemini-live.md). `/ws/avip` still does not open a Live session.
 
 **Date:** 2026-11-01
 
@@ -260,7 +260,9 @@ The Live session also needs representations for `go_away`,
 resumption updates, and 24 kHz downlink versus 16 kHz AVIP uplink. `send_audio`
 does not carry a sample rate. `cancel_response` has no single RPC.
 `tool_result` cannot assume scheduling is accepted. This spike leaves the port
-unchanged and leaves `GeminiLiveProvider` unimplemented.
+unchanged and leaves `GeminiLiveProvider` unimplemented. JEV-23 kept that port
+and mapped the extra signals in [the provider record](../providers/gemini-live.md).
+It did not add event kinds.
 
 ## Alternatives
 

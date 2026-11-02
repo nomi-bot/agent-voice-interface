@@ -313,7 +313,11 @@ capture callback that produces more than 8 frames keeps the newest 8.
 The uplink also watches `WebSocket.bufferedAmount`. The budget is 8 nominal
 frames including the 24-byte header (5312 bytes). A new frame that would pass
 that budget is not sent, the uplink sequence does not advance, and
-`transmitDrops` counts it. A missing budget, or a queue already twice that
+`transmitDrops` counts it. The sender media clock still advances by 20 ms for
+each dropped nominal frame (`noteCaptureGap` on the browser client,
+`note_capture_gap` on the headless clock). The next sent frame keeps the next
+sequence and a later timestamp. Silence is not inserted. `skippedMediaUs` is
+that gap. A contiguous sequence is not continuous speech. A missing budget, or a queue already twice that
 size, closes the socket and stops capture. That close is local. It does not
 send a cancel. The per-callback trim is not this budget: frames already
 accepted by `send` stay in the browser send queue until the socket drains.
@@ -326,10 +330,13 @@ socket and throws without `adopt` still owns that socket.
 
 AVIP version 1 downlink is 16 kHz. The speaker refuses any other declared
 rate instead of playing those bytes on a 16 kHz buffer. Gemini Live output is
-24 kHz. That rate is not this profile. `resampleS16leToAvip` is the conversion
-a future provider has to run before it packs an AVIP downlink frame. The mock
-mirror is already 16 kHz, and this demo does not perform that provider
-conversion.
+24 kHz. That rate is not this profile. `resampleS16leToAvip` converts one
+buffer. `S16leResampler` keeps the cursor across chunks. `GeminiLiveProvider`
+does the same conversion in Python before any future gateway would pack an
+AVIP downlink frame. The mock mirror is already 16 kHz, and this demo does not
+run that conversion. The voice files are served from `clients/browser` in a
+source checkout and from `avi/_browser` inside a wheel. A complete packaged
+directory wins. The route remains an allowlist.
 
 `stopPlayback` flushes that local buffer only. It does not write a control
 envelope, does not close the socket, and does not cancel remote agent work.

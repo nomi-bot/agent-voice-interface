@@ -5,7 +5,7 @@ import {readFileSync} from "node:fs";
 import assert from "node:assert/strict";
 
 import {AUDIO_DOWNLINK, AUDIO_UPLINK, AvipBrowserClient, packFrame, unpackFrame} from "./avip-client.js";
-import {FrameChunker, GEMINI_LIVE_OUTPUT_RATE_HZ, floatToS16le, resampleS16leToAvip, s16leToFloat} from "./pcm.js";
+import {FrameChunker, GEMINI_LIVE_OUTPUT_RATE_HZ, S16leResampler, floatToS16le, resampleS16leToAvip, s16leToFloat} from "./pcm.js";
 import {
   BrowserVoice,
   MAX_UPLINK_QUEUED_BYTES,
@@ -627,6 +627,18 @@ await check("uplink-queue-decision-matches-the-byte-budget", async () => {
   assert.equal(uplinkQueueDecision(-1), "close");
 });
 
+await check("capture-gap-moves-the-clock-without-a-sequence", async () => {
+  const client = liveClient();
+  client.noteCaptureGap(20000);
+  assert.equal(client.sequence, 0);
+  assert.equal(client.timestampUs, 20000n);
+  client.sendUplink(new Uint8Array(640));
+  assert.equal(client.sequence, 1);
+  assert.equal(client.timestampUs, 40000n);
+  assert.equal(unpackFrame(client.writes[0]).timestampUs, 20000n);
+  assert.equal(unpackFrame(client.writes[0]).sequence, 0);
+});
+
 await check("uplink-budget-drops-on-a-non-draining-socket", async () => {
   const client = liveClient();
   client.socket.send = function send(data) {
@@ -649,6 +661,10 @@ await check("uplink-budget-drops-on-a-non-draining-socket", async () => {
     assert.equal(client.sequence, 8);
     assert.equal(ctx.voice.stats.transmitDrops, 3);
     assert.equal(ctx.voice.stats.uplinkFrames, 8);
+    assert.equal(client.timestampUs, 380000n);
+    assert.equal(ctx.voice.stats.skippedMediaUs, 220000);
+    assert.equal(unpackFrame(client.writes[0]).timestampUs, 160000n);
+    assert.equal(unpackFrame(client.writes[7]).timestampUs, 300000n);
     assert.equal(client.state, "open");
     assert.equal(ctx.media.created[0].stopped, false);
   } finally {
@@ -718,6 +734,28 @@ await check("handshake-failure-closes-the-adopted-socket", async () => {
   } finally {
     await ctx.voice.stop();
   }
+});
+
+await check("streaming-resampler-matches-a-one-shot-24k-buffer", async () => {
+  const total = GEMINI_LIVE_OUTPUT_RATE_HZ;
+  const samples = new Float32Array(total);
+  for (let i = 0; i < total; i += 1) samples[i] = Math.sin(i / 17) * 0.4;
+  const pcm = floatToS16le(samples);
+  const once = resampleS16leToAvip(pcm, GEMINI_LIVE_OUTPUT_RATE_HZ);
+  const streaming = new S16leResampler(GEMINI_LIVE_OUTPUT_RATE_HZ, 16000);
+  const parts = [];
+  for (let offset = 0; offset < pcm.length; offset += 960) {
+    parts.push(streaming.push(pcm.subarray(offset, offset + 960)));
+  }
+  const merged = new Uint8Array(parts.reduce((sum, part) => sum + part.length, 0));
+  let cursor = 0;
+  for (const part of parts) {
+    merged.set(part, cursor);
+    cursor += part.length;
+  }
+  assert.equal(merged.length, once.length);
+  assert.deepEqual(merged, once);
+  assert.ok(Math.abs(merged.length / 2 - 16000) < 8);
 });
 
 await check("gemini-24k-pcm-is-not-played-as-avip-16k", async () => {

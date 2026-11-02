@@ -12,6 +12,7 @@ import {
   AVIP_HEADER_BYTES,
   FRAME_BYTES,
   FRAME_SAMPLES,
+  FRAME_US,
   FrameChunker,
   GEMINI_LIVE_OUTPUT_RATE_HZ,
   MAX_BUFFER_FRAMES,
@@ -358,6 +359,7 @@ export class BrowserVoice {
       captureDrops: 0,
       playbackDrops: 0,
       transmitDrops: 0,
+      skippedMediaUs: 0,
     };
     this.client = null;
     this.stream = null;
@@ -577,6 +579,7 @@ export class BrowserVoice {
     const trimmed = trimCaptureBurst(frames);
     if (trimmed.dropped) {
       this.stats.captureDrops += trimmed.dropped;
+      this._skipMedia(trimmed.dropped);
       frames = trimmed.frames;
     }
     let sent = 0;
@@ -604,6 +607,7 @@ export class BrowserVoice {
       }
       const unused = frames.length - index;
       this.stats.transmitDrops += unused;
+      this._skipMedia(unused);
       dropped += unused;
       if (decision === "close") {
         this.telemetry.noteTimeout("uplink-stalled");
@@ -614,6 +618,19 @@ export class BrowserVoice {
       break;
     }
     if (sent || dropped || trimmed.dropped) this._touchStats();
+  }
+
+  // Dropped capture is not a sent frame. Move the uplink media clock forward
+  // by the nominal duration and leave the sequence where it is. Silence is
+  // not inserted: the send queue is already the reason the frame was skipped.
+  _skipMedia(frameCount) {
+    if (!frameCount) return;
+    const gap = FRAME_US * frameCount;
+    this.stats.skippedMediaUs += gap;
+    const client = this.client;
+    if (client && typeof client.noteCaptureGap === "function" && client.state !== "closed") {
+      client.noteCaptureGap(gap);
+    }
   }
 
   _onDownlink(payload) {

@@ -124,6 +124,13 @@ class AvipClient:
             raise
         self._clock.commit()
 
+    def note_capture_gap(self, duration_us: int) -> None:
+        """Record uplink audio that was not sent. See ``UplinkClock``."""
+        self._require_open()
+        if not self._started:
+            raise AvipError("invalid_message")
+        self._clock.note_capture_gap(duration_us)
+
     async def recv(self):
         """Return a ``session.ready`` dict or one decoded downlink frame.
 

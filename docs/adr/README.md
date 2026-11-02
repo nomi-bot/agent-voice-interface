@@ -29,7 +29,9 @@ this PR are 006–010; the draft 0001–0005 names were removed to avoid collisi
   simulator and optional robot-side ROS 2 bridge; physical actuation is excluded.
 - [011: Gemini Live compatibility](011-gemini-live-compatibility.md) proposes the
   M1 spike target: Gemini Developer API, `google-genai==2.34.0`, and an
-  operator-supplied model code. The provider remains unimplemented.
+  operator-supplied model code. `GeminiLiveProvider` now implements
+  `VoiceProvider`; the gateway still does not open it. See
+  [the provider record](../providers/gemini-live.md).
 
 ## Review policy
 

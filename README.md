@@ -16,15 +16,15 @@ The current implementation supplies a Python 3.12+ FastAPI gateway, four adapter
 an asynchronous mock agent, a JSON WebSocket control protocol, tests and CI.
 The original Apache-2.0 LICENSE is preserved.
 
-**There is no Gemini voice provider or working Hermes integration yet.** A browser
-page can capture a microphone and play the mock PCM mirror; that is not a voice
-provider. No full-duplex, latency or macOS runtime performance claim
-has been validated. Provider placeholders fail explicitly rather than simulating
-a successful integration. The default install has no Google SDK. The optional
-`gemini-live` extra pins `google-genai==2.34.0` for the compatibility smoke in
-[ADR-011](docs/adr/011-gemini-live-compatibility.md). That smoke reads
-`GEMINI_API_KEY` and `GEMINI_LIVE_MODEL` from the environment and does not embed
-a model id.
+**The gateway still has no live voice session and no Hermes integration.**
+`GeminiLiveProvider` implements the `VoiceProvider` port
+([provider record](docs/providers/gemini-live.md)). `/ws/avip` does not construct
+it. A browser page can capture a microphone and play the mock PCM mirror. No
+full-duplex, latency, or macOS runtime claim has been validated against Gemini.
+The default install has no Google SDK. The optional `gemini-live` extra pins
+`google-genai==2.34.0` for the adapter and the compatibility smoke in
+[ADR-011](docs/adr/011-gemini-live-compatibility.md). Both read `GEMINI_API_KEY`
+and `GEMINI_LIVE_MODEL` from the environment and do not embed a model id.
 
 M0 is in progress. The gateway validates the AVIP v1 session handshake and serves
 it on `/ws/avip`, together with binary media frames once audio input is
@@ -63,22 +63,31 @@ This skeleton does not load environment files. Never commit a populated `.env`.
 python -m unittest discover -s tests -v
 ```
 
-## Gemini Live compatibility smoke
+## Gemini Live provider
 
-The smoke checks the pinned SDK. It opens one short Live session only when
-`GEMINI_API_KEY` and `GEMINI_LIVE_MODEL` are both set. It does not implement
-`GeminiLiveProvider`.
+`GeminiLiveProvider` speaks the existing port: 16 kHz uplink, 24 kHz downlink
+resampled to 16 kHz with a streaming converter, bounded queues, and
+`close` on connect failure, `GoAway`, and cancel. It declares one tool,
+`avi_ack`, with explicit `BLOCKING` or `NON_BLOCKING` behavior. The gateway
+does not open this session. `GET /health` still reports `voice: not_implemented`.
+Details, negative cases, and the deferred list are in
+[the provider record](docs/providers/gemini-live.md).
+
+The compatibility smoke is unchanged. It opens one short Live session only when
+`GEMINI_API_KEY` and `GEMINI_LIVE_MODEL` are both set.
 
 ```sh
 python -m pip install -e '.[dev,gemini-live]'
-python -m unittest tests.test_gemini_live_spike -v
+python -m unittest discover -s tests -v
 python -m avi.providers.gemini_live_spike
 ```
 
-Without `GEMINI_API_KEY`, the unittest skips the network case and the module
-exits 2. With a key and no `GEMINI_LIVE_MODEL`, both fail instead of choosing
-a model. Exit 0 means a live turn completed. Model codes and the async-tool
-limits are in [ADR-011](docs/adr/011-gemini-live-compatibility.md).
+Without `GEMINI_API_KEY`, discovery skips the network cases and the smoke
+module exits 2. With a key and no `GEMINI_LIVE_MODEL`, both fail instead of
+choosing a model. Exit 0 from the smoke module means a live turn completed.
+The adapter's duplex and tool-handshake tests run in that same discovery and
+skip for the same reason. Model codes and the async-tool limits are in
+[ADR-011](docs/adr/011-gemini-live-compatibility.md).
 
 ## WebSocket smoke test
 
@@ -194,7 +203,9 @@ frames, and plays the mirrored 16 kHz downlink. Gemini Live’s 24 kHz output is
 not this profile and is not played as 16 kHz. **Stop playback** flushes only the
 local speaker. It does not send a control message and it does not close the
 session. If the WebSocket send queue reaches 8 unsent nominal frames, later
-microphone frames are dropped and counted. A queue with no byte budget closes
+microphone frames are dropped and counted. A dropped frame does not advance
+the uplink sequence. It does advance the sender media clock, so the next sent
+frame's timestamp shows the gap. A queue with no byte budget closes
 the socket and releases the microphone. The page adopts the socket before the
 handshake, so a failed handshake closes it too.
 
