@@ -16,9 +16,13 @@ frames are queued and then taken by a mock sink on this session. The same
 driver handles every device label.
 """
 import asyncio
+import json
 import logging
 import secrets
+from collections.abc import Callable
 from typing import NoReturn, Protocol
+
+from avi.telemetry import VoiceTelemetry
 
 from avi.core.lifecycle import SessionCloseReason, VoiceSession, VoiceSessionState
 from avi.core.session import SessionLimits
@@ -92,7 +96,11 @@ def _session_close_reason(ending: _SessionEnd | None) -> SessionCloseReason:
 
 class AvipSession:
     def __init__(self, transport: AvipTransport, limits: SessionLimits,
-                 available: Capabilities):
+                 available: Capabilities, *,
+                 clock: Callable[[], float] | None = None,
+                 wall_clock: Callable[[], float] | None = None,
+                 telemetry_path: str = "mock-mirror",
+                 telemetry_scenario: str = "gateway"):
         self.transport = transport
         self.limits = limits
         self.available = available
@@ -101,6 +109,19 @@ class AvipSession:
         self.delivery: MediaDelivery | None = None
         self.sink: MockMediaSink | None = None
         self.voice_session = VoiceSession()
+        # Session clock is monotonic milliseconds in this process. It is not
+        # the client's page clock and not the AVIP media timestamp.
+        # Defaults describe the mock sink. JEV-23 must pass
+        # telemetry_path="provider" when a real provider is attached, or
+        # model latency is reported as mock-mirror.
+        self.telemetry = VoiceTelemetry(
+            client="gateway",
+            path=telemetry_path,
+            scenario=telemetry_scenario,
+            now=clock,
+            wall_now=wall_clock,
+        )
+        self.telemetry_report: dict | None = None
         self._downlink_sequence = 0
         self._downlink_timestamp = 0
 
@@ -109,6 +130,7 @@ class AvipSession:
             async with asyncio.timeout(self.limits.send_timeout):
                 await self.transport.send(payload)
         except TimeoutError:
+            self.telemetry.note_timeout("send")
             raise _SessionEnd(1013, "Send timeout") from None
 
     async def _send_bytes(self, payload: bytes) -> None:
@@ -116,6 +138,7 @@ class AvipSession:
             async with asyncio.timeout(self.limits.send_timeout):
                 await self.transport.send_bytes(payload)
         except TimeoutError:
+            self.telemetry.note_timeout("send")
             raise _SessionEnd(1013, "Send timeout") from None
 
     async def _reject(self, error: ProtocolError, code: int, reason: str) -> NoReturn:
@@ -127,6 +150,7 @@ class AvipSession:
             async with asyncio.timeout(self.limits.idle_timeout):
                 return await self.transport.receive_message()
         except TimeoutError:
+            self.telemetry.note_timeout("idle")
             raise _SessionEnd(1001, "Idle timeout") from None
         except TransportFrameError as exc:
             if exc.binary:
@@ -153,6 +177,8 @@ class AvipSession:
             request_id=start.request_id,
             device_id=start.device_id,
         )
+        self.telemetry.set_session_id(ready["session_id"])
+        self.telemetry.mark("session-start")
         if self.negotiated.audio_input:
             self.sink = MockMediaSink(self.delivery)
             self.sink.start()
@@ -190,9 +216,15 @@ class AvipSession:
             delivery.submit(frame)
         except ProtocolError as exc:
             if exc.code == "queue_full":
+                self.telemetry.note_queue_full()
                 await self._send(error_envelope(exc))
                 return
             await self._reject(exc, 1002, "Protocol error")
+        observed = self.telemetry.now()
+        self.telemetry.note_buffer_depth(delivery.depth(Direction.AUDIO_UPLINK))
+        self.telemetry.note_uplink(observed)
+        self.telemetry.mark("first-uplink", observed)
+        self.telemetry.add_counter("uplinkFrames")
         if self.sink is not None:
             self.sink.reclaim()
         if negotiated.audio_output:
@@ -203,6 +235,10 @@ class AvipSession:
                 frame.payload,
             )
             await self._send_bytes(pack_frame(echo))
+            mirrored = self.telemetry.now()
+            self.telemetry.note_downlink(mirrored)
+            self.telemetry.mark("first-downlink", mirrored)
+            self.telemetry.add_counter("downlinkFrames")
             self._downlink_sequence = next_sequence(self._downlink_sequence)
             self._downlink_timestamp += _duration_us(frame.payload)
 
@@ -219,6 +255,19 @@ class AvipSession:
                     ProtocolError("session_already_started"), 1002, "Protocol error"
                 )
             await self._send(error_envelope(ProtocolError("unsupported_message_type", "type")))
+
+    def _finish_telemetry(self) -> None:
+        """Snapshot counters once. The log line has no PCM and no credentials."""
+        sink = self.sink
+        if sink is not None:
+            self.telemetry.note_sink(sink.high_water, sink.consumed)
+        if self.session_id is not None:
+            self.telemetry.set_session_id(self.session_id)
+        self.telemetry_report = self.telemetry.report()
+        logger.info(
+            "voice_telemetry %s",
+            json.dumps(self.telemetry_report, separators=(",", ":"), sort_keys=True),
+        )
 
     def _end_voice_session(self, ending: _SessionEnd | None) -> None:
         """Record the socket outcome on the voice session, if it is still open."""
@@ -237,6 +286,10 @@ class AvipSession:
             except TransportDisconnected:
                 pass
         finally:
+            try:
+                self._finish_telemetry()
+            except Exception:
+                logger.exception("voice telemetry report failed")
             try:
                 self._end_voice_session(ending)
             finally:

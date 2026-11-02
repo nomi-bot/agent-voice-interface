@@ -40,6 +40,15 @@
     dt { color: #5e584e; }
     dd { margin: 0; }
     code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.92em; }
+    pre {
+      margin: 0.4rem 0 0;
+      padding: 0.75rem;
+      background: #f6f4ef;
+      border-radius: 8px;
+      overflow: auto;
+      max-height: 16rem;
+      font: 0.78rem/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
     ul { margin: 0.3rem 0 0.3rem 1.2rem; padding: 0; }
   </style>
 </head>
@@ -76,13 +85,17 @@
     </dl>
 
     <h2>Timing hooks</h2>
-    <p>Local clock only. These names are the hooks a later measurement pass can formalize. They are not a cross-host latency result.</p>
+    <p>Session clock only (<code>performance.now</code> on this page). <code>capture-start</code>, <code>session-start</code>, <code>first-uplink</code>, <code>first-downlink</code>, and <code>playback-start</code> share that clock. The JSON report below also stores one wall-clock anchor so the session can be placed on a timeline. Neither clock is the AVIP media timestamp, and neither is a cross-host latency.</p>
     <dl id="metrics">
       <dt>capture-start</dt><dd>—</dd>
       <dt>first-uplink</dt><dd>—</dd>
       <dt>first-downlink</dt><dd>—</dd>
       <dt>playback-start</dt><dd>—</dd>
     </dl>
+
+    <h2>Telemetry report</h2>
+    <p>Same object <code>voice.telemetry.report()</code> writes. Cost fields stay null on the mock mirror. The report has no audio bytes and no API key.</p>
+    <pre id="telemetry-report">—</pre>
 
     <h2>Manual checks</h2>
     <ul>
@@ -135,6 +148,8 @@
         return `<dt>${name}</dt><dd>${value}</dd>`;
       });
       document.querySelector("#metrics").innerHTML = rows.join("");
+      const report = voice ? voice.telemetry.report() : null;
+      document.querySelector("#telemetry-report").textContent = report ? JSON.stringify(report, null, 2) : "—";
     }
 
     function setStatus(text, warn) {

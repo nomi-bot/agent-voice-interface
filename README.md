@@ -218,9 +218,16 @@ Browser checks that do not need a microphone:
 
 ```sh
 node clients/browser/voice-check.mjs
+node clients/browser/voice-soak.mjs --seconds 2
+python -m avi.telemetry --seconds 2
 ```
 
-`python3.12 -m unittest discover -s tests -v` runs that file. The manual
+The soak writes one JSON report and does not open a microphone or a voice
+provider. It is not part of the unit suite. Clocks, the live mock-mirror
+probe, and the credential rule are in
+[voice telemetry](docs/voice-telemetry.md).
+
+`python3.12 -m unittest discover -s tests -v` runs `voice-check.mjs`. The manual
 negative paths (permission denied, unplug, gateway stop) are listed on the
 voice page.
 

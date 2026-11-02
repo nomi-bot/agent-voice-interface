@@ -345,9 +345,15 @@ opened from one of those origins. Permission denial, a track that ends, and a
 socket close all stop the local capture track. Permission denial happens
 before a socket is opened.
 
-The page records four local timestamps for a later measurement pass:
-`capture-start`, `first-uplink`, `first-downlink`, and `playback-start`.
-Those values share one page clock. They are not a cross-host latency.
+The page records five timestamps on one session clock (`performance.now`,
+reported by the hook as `local`): `capture-start`, `session-start`,
+`first-uplink`, `first-downlink`, and `playback-start`. The same clock feeds
+`voice.telemetry.report()`, a local JSON object. That report also stores one
+wall-clock anchor and names the AVIP media clock, which starts at 0 per
+direction and is not subtracted from the session clock. The report is not an
+AVIP message. There is still no cross-host latency. The measurement notes,
+soak command, and credential rules are in
+[voice telemetry](../voice-telemetry.md).
 
 Run the suite from a Python 3.12 environment with the project installed:
 
@@ -355,6 +361,8 @@ Run the suite from a Python 3.12 environment with the project installed:
 python3.12 -m unittest discover -s tests -v
 python3.12 -m unittest discover -s tests -p 'test_avip*.py' -v
 node clients/browser/voice-check.mjs
+node clients/browser/voice-soak.mjs --seconds 2
+python -m avi.telemetry --seconds 2
 ```
 
 The SDK comparison shells out to `node` to execute the browser adapter. Node

@@ -18,13 +18,20 @@ import {
   SAMPLE_RATE_HZ,
   s16leToFloat,
 } from "./pcm.js";
+import {VOICE_MARKS, VoiceTelemetry} from "./telemetry.js";
 
-export const VOICE_METRICS = [
-  "capture-start",
-  "first-uplink",
-  "first-downlink",
-  "playback-start",
-];
+// The page and the checks still import this name. session-start is the hook
+// added for the measurement report. The other four are the JEV-24 names.
+export const VOICE_METRICS = VOICE_MARKS;
+
+// One capture callback keeps the newest frames and counts the rest as drops.
+// The depth is the same 8-frame cap as MediaDelivery and the speaker buffer.
+export function trimCaptureBurst(frames, depth = MAX_BUFFER_FRAMES) {
+  if (!Array.isArray(frames)) throw new Error("invalid_audio");
+  if (frames.length <= depth) return {frames, dropped: 0};
+  const dropped = frames.length - depth;
+  return {frames: frames.slice(dropped), dropped};
+}
 
 export const DEVELOPMENT_ORIGINS = ["http://127.0.0.1:8000", "http://localhost:8000"];
 export const CAPTURE_WORKLET_URL = "/voice/capture-worklet.js";
@@ -170,6 +177,15 @@ export class SpeakerBuffer {
     return true;
   }
 
+  // Scheduled horizon in nominal 20 ms frames, on the audio clock passed as
+  // `now` (AudioContext.currentTime in the page). This is not the page clock.
+  depthFrames() {
+    const start = this.now();
+    const horizon = this.nextTime - start;
+    if (horizon <= 0) return 0;
+    return horizon / NOMINAL_FRAME_SEC;
+  }
+
   stop() {
     for (const handle of this.handles) {
       try {
@@ -311,12 +327,14 @@ function denied(error) {
 export class BrowserVoice {
   constructor({
     now = defaultNow,
+    wallNow,
     onMetric = () => {},
     onStatus = () => {},
     onStats = () => {},
     media = browserMedia(),
     audio = createBrowserAudio(),
     downlinkRateHz = SAMPLE_RATE_HZ,
+    path = "mock-mirror",
   } = {}) {
     this.now = now;
     this.onMetric = onMetric;
@@ -325,6 +343,13 @@ export class BrowserVoice {
     this.media = media;
     this.audio = audio;
     this.downlinkRateHz = downlinkRateHz;
+    this.telemetry = new VoiceTelemetry({
+      now: this.now,
+      wallNow,
+      client: "browser",
+      path,
+      scenario: "page",
+    });
     this.metrics = {};
     this.stats = {
       uplinkFrames: 0,
@@ -347,10 +372,30 @@ export class BrowserVoice {
   }
 
   _mark(name) {
+    this._markAt(name, this.now());
+  }
+
+  // `clock: "local"` is the session clock on this page (performance.now, or
+  // the injected now). It is not the wall clock and not the AVIP media clock.
+  _markAt(name, at) {
     if (Object.prototype.hasOwnProperty.call(this.metrics, name)) return;
-    const at = this.now();
     this.metrics[name] = at;
+    this.telemetry.mark(name, at);
     this.onMetric(name, {at, clock: "local"});
+  }
+
+  _touchStats() {
+    this.telemetry.setCounters({
+      uplinkFrames: this.stats.uplinkFrames,
+      downlinkFrames: this.stats.downlinkFrames,
+      playbackFrames: this.stats.playbackFrames,
+      captureDrops: this.stats.captureDrops,
+      transmitDrops: this.stats.transmitDrops,
+      speakerDrops: this.stats.playbackDrops,
+      timeouts: this.telemetry.counters.timeouts,
+      queueFull: this.telemetry.counters.queueFull,
+    });
+    this.onStats(this.stats);
   }
 
   _releaseStream() {
@@ -500,6 +545,7 @@ export class BrowserVoice {
       throw error;
     }
     this.running = true;
+    this._mark("session-start");
     this._reader = this._readLoop();
     this.onStatus("live", {});
   }
@@ -528,26 +574,31 @@ export class BrowserVoice {
       this.onStatus("capture-failed", {message: error.message});
       return;
     }
-    if (frames.length > MAX_BUFFER_FRAMES) {
-      const overflow = frames.length - MAX_BUFFER_FRAMES;
-      this.stats.captureDrops += overflow;
-      frames = frames.slice(overflow);
+    const trimmed = trimCaptureBurst(frames);
+    if (trimmed.dropped) {
+      this.stats.captureDrops += trimmed.dropped;
+      frames = trimmed.frames;
     }
     let sent = 0;
     let dropped = 0;
     for (let index = 0; index < frames.length; index += 1) {
       const payload = frames[index];
       if (!this.captureLive || this.client.state === "closed") break;
-      const decision = uplinkQueueDecision(this._bufferedAmount(), AVIP_HEADER_BYTES + payload.length);
+      const buffered = this._bufferedAmount();
+      this.telemetry.noteUplinkQueued(buffered);
+      const decision = uplinkQueueDecision(buffered, AVIP_HEADER_BYTES + payload.length);
       if (decision === "send") {
         try {
           this.client.sendUplink(payload);
         } catch (error) {
+          this._touchStats();
           void this._shutdown("disconnected", {message: error.message}).catch(() => {});
           return;
         }
+        const at = this.now();
         this.stats.uplinkFrames += 1;
-        this._mark("first-uplink");
+        this.telemetry.noteUplink(at);
+        this._markAt("first-uplink", at);
         sent += 1;
         continue;
       }
@@ -555,39 +606,47 @@ export class BrowserVoice {
       this.stats.transmitDrops += unused;
       dropped += unused;
       if (decision === "close") {
+        this.telemetry.noteTimeout("uplink-stalled");
         void this._shutdown("uplink-stalled", {
           message: "The uplink send queue stopped draining. Capture stopped and the session was closed. No cancel was sent.",
         }).catch(() => {});
       }
       break;
     }
-    if (sent || dropped) this.onStats(this.stats);
+    if (sent || dropped || trimmed.dropped) this._touchStats();
   }
 
   _onDownlink(payload) {
+    const at = this.now();
     this.stats.downlinkFrames += 1;
-    this._mark("first-downlink");
+    this._markAt("first-downlink", at);
+    this.telemetry.noteDownlink(at);
     let scheduled;
     try {
       scheduled = playbackSchedule(payload, this.downlinkRateHz);
     } catch (error) {
       this.stats.playbackDrops += 1;
       this.onStatus("playback-failed", {message: error.message});
-      this.onStats(this.stats);
+      this._touchStats();
       return;
     }
     if (this.playbackHalted || !this.speaker) {
-      this.onStats(this.stats);
+      this._touchStats();
       return;
     }
     const played = this.speaker.enqueue(scheduled.payload);
+    if (typeof this.speaker.depthFrames === "function") {
+      this.telemetry.noteBufferDepth(this.speaker.depthFrames());
+    }
     if (played) {
+      const heard = this.now();
       this.stats.playbackFrames += 1;
-      this._mark("playback-start");
+      this._markAt("playback-start", heard);
+      this.telemetry.noteAudible(heard);
     } else {
       this.stats.playbackDrops += 1;
     }
-    this.onStats(this.stats);
+    this._touchStats();
   }
 
   async _readLoop() {
@@ -598,6 +657,11 @@ export class BrowserVoice {
       } catch (error) {
         if (this._shutdownDone || !this.running) return;
         if (this.client.state !== "closed") {
+          const message = error && error.message ? String(error.message) : "";
+          if (message === "queue_full" || message.startsWith("queue_full:")) {
+            this.telemetry.noteQueueFull();
+            this._touchStats();
+          }
           this.onStatus("avip-error", {message: error.message});
           continue;
         }

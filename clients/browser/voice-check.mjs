@@ -142,6 +142,7 @@ function boot(options = {}) {
   const clock = {value: 10};
   const voice = new BrowserVoice({
     now: () => clock.value,
+    wallNow: options.wallNow,
     onMetric(name, detail) {
       metrics.push({name, at: detail.at, clock: detail.clock});
     },
@@ -235,6 +236,7 @@ async function runLive(url) {
     uplink: voice.stats.uplinkFrames,
     downlink: voice.stats.downlinkFrames,
     played: audio.played.length,
+    report: voice.telemetry.report(),
   }));
 }
 
@@ -424,6 +426,7 @@ await check("downlink-plays-and-records-timing", async () => {
     assert.equal(ctx.voice.stats.playbackFrames, 1);
     assert.deepEqual(ctx.metrics.map((item) => item.name), [
       "capture-start",
+      "session-start",
       "first-uplink",
       "first-downlink",
       "playback-start",
@@ -743,6 +746,63 @@ await check("gemini-24k-pcm-is-not-played-as-avip-16k", async () => {
     assert.equal(ctx.voice.metrics["playback-start"], undefined);
     assert.ok(names(ctx.statuses).includes("playback-failed"));
     assert.equal(ctx.client.state, "open");
+  } finally {
+    await ctx.voice.stop();
+  }
+});
+
+await check("telemetry-report-uses-the-session-clock", async () => {
+  const ctx = boot({wallNow: () => 1700000000000});
+  try {
+    await ctx.start;
+    for (let index = 0; index < 10; index += 1) {
+      ctx.clock.value = 20 + index * 20;
+      ctx.audio.samples(new Float32Array(320), 16000);
+      ctx.clock.value = 25 + index * 20;
+      pushDownlink(ctx.client);
+      await flush();
+    }
+    const report = ctx.voice.telemetry.report();
+    assert.equal(report.schema, "avi.voice-telemetry/1");
+    assert.equal(report.path, "mock-mirror");
+    assert.equal(report.client, "browser");
+    assert.equal(report.scenario, "page");
+    assert.equal(report.clocks.session.name, "local");
+    assert.equal(report.clocks.session.scope, "page-or-process");
+    assert.equal(report.clocks.session.comparableAcrossHosts, false);
+    assert.match(report.clocks.session.description, /performance\.now/);
+    assert.match(report.clocks.media.description, /Do not subtract/);
+    assert.equal(report.clocks.wall.anchorSessionMs, 10);
+    assert.equal(report.clocks.wall.anchorWallMs, 1700000000000);
+    assert.equal(report.marks["capture-start"].sessionMs, 10);
+    assert.equal(report.marks["session-start"].sessionMs, 10);
+    assert.equal(report.marks["first-uplink"].sessionMs, 20);
+    assert.equal(report.marks["first-downlink"].sessionMs, 25);
+    assert.equal(report.marks["playback-start"].sessionMs, 25);
+    assert.equal(report.intervalsMs.captureToUplink, 10);
+    assert.equal(report.intervalsMs.uplinkToDownlink, 5);
+    assert.equal(report.intervalsMs.downlinkToAudible, 0);
+    assert.equal(report.counters.uplinkFrames, 10);
+    assert.equal(report.counters.downlinkFrames, 10);
+    assert.equal(report.counters.playbackFrames, 8);
+    assert.equal(report.counters.speakerDrops, 2);
+    assert.equal(report.counters.captureDrops, 0);
+    assert.equal(report.e2e.clock, "session");
+    assert.equal(report.e2e.scope, "mock-mirror");
+    assert.equal(report.e2e.uplinkToDownlink.count, 10);
+    assert.equal(report.e2e.uplinkToDownlink.min, 5);
+    assert.equal(report.e2e.uplinkToDownlink.p95, 5);
+    assert.equal(report.e2e.uplinkToAudible.count, 8);
+    assert.equal(report.cost.provider, null);
+    assert.equal(report.cost.amount, null);
+    assert.equal(report.cost.inputTokens, null);
+    assert.equal(JSON.stringify(report).includes("AIza"), false);
+    assert.equal(JSON.stringify(report).toLowerCase().includes("hermes"), false);
+    ctx.voice.telemetry.noteCost({provider: "gemini", apiKey: "AIzaSyTESTSECRETVALUE", amount: 1});
+    const refused = ctx.voice.telemetry.report();
+    assert.equal(refused.cost.provider, null);
+    assert.equal(refused.cost.amount, null);
+    assert.equal(JSON.stringify(refused).includes("AIzaSyTESTSECRETVALUE"), false);
   } finally {
     await ctx.voice.stop();
   }
