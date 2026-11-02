@@ -98,7 +98,9 @@ class AvipSession:
     def __init__(self, transport: AvipTransport, limits: SessionLimits,
                  available: Capabilities, *,
                  clock: Callable[[], float] | None = None,
-                 wall_clock: Callable[[], float] | None = None):
+                 wall_clock: Callable[[], float] | None = None,
+                 telemetry_path: str = "mock-mirror",
+                 telemetry_scenario: str = "gateway"):
         self.transport = transport
         self.limits = limits
         self.available = available
@@ -109,10 +111,13 @@ class AvipSession:
         self.voice_session = VoiceSession()
         # Session clock is monotonic milliseconds in this process. It is not
         # the client's page clock and not the AVIP media timestamp.
+        # Defaults describe the mock sink. JEV-23 must pass
+        # telemetry_path="provider" when a real provider is attached, or
+        # model latency is reported as mock-mirror.
         self.telemetry = VoiceTelemetry(
             client="gateway",
-            path="mock-mirror",
-            scenario="gateway",
+            path=telemetry_path,
+            scenario=telemetry_scenario,
             now=clock,
             wall_now=wall_clock,
         )

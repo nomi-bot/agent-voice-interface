@@ -113,12 +113,24 @@ those values stay null. `note_cost` refuses a credential-shaped key or value
 and leaves the previous cost fields unchanged. `report()` also redacts
 strings that look like secrets.
 
+The development gateway constructs telemetry with `path="mock-mirror"` and
+`scenario="gateway"`. Those are constructor arguments (`telemetry_path`,
+`telemetry_scenario`), not a permanent label for every future session.
+JEV-23 must pass `telemetry_path="provider"` when a real provider is
+attached. Leaving the default would report model latency as mock-mirror.
+
 ## Gemini
 
 Real Gemini sessions are not part of this slice. `GeminiLiveProvider` still
-raises `NotImplementedError`. `tests/test_gemini_voice_integration.py` is
-discovered by the unit suite and skips unless `GEMINI_API_KEY` or
-`GOOGLE_API_KEY` is set, `AVI_GEMINI_MODEL` is set, and that provider can be
-constructed. The skip text names the variables. It does not include their
-values. CI sets none of them. The test does not print the environment and
+raises `NotImplementedError`. The gated test uses the same operator contract
+as [ADR-011](adr/011-gemini-live-compatibility.md): `GEMINI_API_KEY` is the
+only credential, and `GEMINI_LIVE_MODEL` is the only model pin. `GOOGLE_API_KEY`
+is ignored. There is no `AVI_GEMINI_MODEL` alias.
+
+`tests/test_gemini_voice_integration.py` is discovered by the unit suite.
+Unset `GEMINI_API_KEY` skips, including when only `GOOGLE_API_KEY` is present.
+A key without `GEMINI_LIVE_MODEL` fails closed instead of choosing a model.
+Both set, while the provider is still unimplemented, skips without placing a
+call. Skip and failure text name the variables and do not include their
+values. CI sets neither variable. The test does not print the environment and
 does not put a key in a report.

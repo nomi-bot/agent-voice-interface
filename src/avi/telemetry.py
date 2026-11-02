@@ -42,6 +42,8 @@ from collections.abc import Mapping
 from typing import Callable
 
 
+# Keep this twin in sync with clients/browser/telemetry.js (SCHEMA).
+# The Node/Python soak equality test fails if the report shape drifts.
 SCHEMA = "avi.voice-telemetry/1"
 MARKS = (
     "capture-start",

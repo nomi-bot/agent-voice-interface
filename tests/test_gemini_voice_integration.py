@@ -1,14 +1,17 @@
 """Gated Gemini Live telemetry.
 
-Discovered by ``python -m unittest``. CI has no Gemini credential and no model
-pin, so the session test skips. Skip text names environment variables and
-never includes their values. This module does not read a key into a report
-and does not open a provider socket.
+Discovered by ``python -m unittest``. The operator contract matches ADR-011
+and ``avi.providers.gemini_live_spike``: ``GEMINI_API_KEY`` is the only
+credential, and ``GEMINI_LIVE_MODEL`` is the only model pin. ``GOOGLE_API_KEY``
+is ignored. There is no ``AVI_GEMINI_MODEL`` alias.
+
+CI sets neither variable, so the session test skips. Skip and failure text
+name the variables and never include their values. This module does not read
+a key into a report and does not open a provider socket.
 
 The provider itself is still the JEV-23 placeholder. When that class can be
 constructed, the session test checks the voice-provider surface and a
-provider-path telemetry report. It still does not call ``start``; a networked
-turn belongs with the provider implementation.
+provider-path telemetry report. It still does not call ``start``.
 """
 
 import json
@@ -16,9 +19,14 @@ import os
 import unittest
 
 
-_KEY_NAMES = ("GEMINI_API_KEY", "GOOGLE_API_KEY")
-_MODEL_NAME = "AVI_GEMINI_MODEL"
-_GATE_NAMES = _KEY_NAMES + (_MODEL_NAME,)
+_KEY_NAME = "GEMINI_API_KEY"
+_MODEL_NAME = "GEMINI_LIVE_MODEL"
+_IGNORED = ("GOOGLE_API_KEY", "AVI_GEMINI_MODEL")
+_SAVED = (_KEY_NAME, _MODEL_NAME, *_IGNORED)
+
+
+class GeminiModelUnconfigured(Exception):
+    """A key is set and the model pin is not. The message has no secret."""
 
 
 def _present(name: str) -> bool:
@@ -29,15 +37,16 @@ def _present(name: str) -> bool:
 def gemini_integration_gate() -> str | None:
     """Return a fixed skip reason, or None when the provider can be constructed.
 
-    The reason does not interpolate environment values.
+    The reason does not interpolate environment values. A set key with no
+    ``GEMINI_LIVE_MODEL`` raises ``GeminiModelUnconfigured`` instead of skipping.
     """
-    if not any(_present(name) for name in _KEY_NAMES):
-        return (
-            "Gemini credential is unset (GEMINI_API_KEY or GOOGLE_API_KEY); "
-            "integration skipped"
-        )
+    if not _present(_KEY_NAME):
+        return "GEMINI_API_KEY is unset; integration skipped"
     if not _present(_MODEL_NAME):
-        return "AVI_GEMINI_MODEL is unset; integration skipped"
+        raise GeminiModelUnconfigured(
+            "GEMINI_API_KEY is set but GEMINI_LIVE_MODEL is unset; "
+            "refusing to choose a model"
+        )
     try:
         from avi.providers.gemini_live import GeminiLiveProvider
 
@@ -50,17 +59,31 @@ def gemini_integration_gate() -> str | None:
 
 
 class GeminiVoiceIntegrationTests(unittest.TestCase):
-    def test_skip_reason_omits_credential_values(self):
+    def test_gate_matches_adr_011_and_omits_credential_values(self):
         secret = "AIzaSyTESTSECRETVALUE"
-        pin = "models/gemini-test-pin"
-        saved = {name: os.environ.get(name) for name in _GATE_NAMES}
+        pin = "gemini-test-pin"
+        alias = "models/avi-gemini-alias"
+        saved = {name: os.environ.get(name) for name in _SAVED}
         try:
-            os.environ["GEMINI_API_KEY"] = secret
-            os.environ.pop("GOOGLE_API_KEY", None)
+            os.environ.pop(_KEY_NAME, None)
+            os.environ["GOOGLE_API_KEY"] = secret
+            os.environ["AVI_GEMINI_MODEL"] = alias
+            os.environ[_MODEL_NAME] = pin
+            missing_key = gemini_integration_gate()
+            self.assertEqual(missing_key, "GEMINI_API_KEY is unset; integration skipped")
+            self.assertNotIn(secret, missing_key)
+            self.assertNotIn(pin, missing_key)
+            self.assertNotIn("GOOGLE_API_KEY", missing_key)
+            self.assertNotIn("AVI_GEMINI_MODEL", missing_key)
+
+            os.environ[_KEY_NAME] = secret
             os.environ.pop(_MODEL_NAME, None)
-            missing_pin = gemini_integration_gate()
-            self.assertIn("AVI_GEMINI_MODEL", missing_pin)
-            self.assertNotIn(secret, missing_pin)
+            with self.assertRaises(GeminiModelUnconfigured) as caught:
+                gemini_integration_gate()
+            self.assertIn("GEMINI_LIVE_MODEL", str(caught.exception))
+            self.assertNotIn(secret, str(caught.exception))
+            self.assertNotIn(alias, str(caught.exception))
+
             os.environ[_MODEL_NAME] = pin
             not_implemented = gemini_integration_gate()
             self.assertIn("not implemented", not_implemented)
@@ -74,7 +97,10 @@ class GeminiVoiceIntegrationTests(unittest.TestCase):
                     os.environ[name] = value
 
     def test_provider_path_report_when_the_provider_exists(self):
-        reason = gemini_integration_gate()
+        try:
+            reason = gemini_integration_gate()
+        except GeminiModelUnconfigured as exc:
+            self.fail(str(exc))
         if reason is not None:
             self.skipTest(reason)
         from avi.providers.gemini_live import GeminiLiveProvider
@@ -96,7 +122,7 @@ class GeminiVoiceIntegrationTests(unittest.TestCase):
         self.assertEqual(report["e2e"]["scope"], "provider")
         self.assertIsNone(report["cost"]["amount"])
         encoded = json.dumps(report)
-        for name in _GATE_NAMES:
+        for name in (_KEY_NAME, _MODEL_NAME, *_IGNORED):
             value = os.environ.get(name)
             if value:
                 self.assertNotIn(value, encoded)

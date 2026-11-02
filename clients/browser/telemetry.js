@@ -19,6 +19,8 @@
 // downlink on the session clock. That is loopback, not a model latency.
 // cost stays null until a provider calls noteCost.
 
+// Keep this twin in sync with src/avi/telemetry.py (SCHEMA).
+// The Node/Python soak equality test fails if the report shape drifts.
 export const SCHEMA = "avi.voice-telemetry/1";
 export const VOICE_MARKS = [
   "capture-start",

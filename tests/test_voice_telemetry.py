@@ -157,6 +157,22 @@ class VoiceTelemetryTests(unittest.TestCase):
         self.assertIn("Do not subtract", accepted["clocks"]["media"]["description"])
         self.assertFalse(accepted["clocks"]["wall"]["comparableAcrossHosts"])
 
+    def test_gateway_path_and_scenario_are_constructor_arguments(self):
+        session = AvipSession(
+            Peer([]),
+            SessionLimits(),
+            Capabilities(),
+            telemetry_path="provider",
+            telemetry_scenario="gemini-live",
+        )
+        report = session.telemetry.report()
+        self.assertEqual(report["path"], "provider")
+        self.assertEqual(report["scenario"], "gemini-live")
+        self.assertEqual(report["e2e"]["scope"], "provider")
+        default = AvipSession(Peer([]), SessionLimits(), Capabilities())
+        self.assertEqual(default.telemetry.report()["path"], "mock-mirror")
+        self.assertEqual(default.telemetry.report()["scenario"], "gateway")
+
     def test_uplink_budget_matches_the_browser_thresholds(self):
         self.assertEqual(UPLINK_FRAME_BYTES, 664)
         self.assertEqual(uplink_queue_decision(0), "send")
