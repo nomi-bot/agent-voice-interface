@@ -17,6 +17,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["httpx>=0.27,<1"]
+gemini-live = ["google-genai==2.34.0"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/avi", "src/avip_client"]

@@ -34,7 +34,8 @@ Current initialization skeleton includes FastAPI JSON WebSocket control, the `/w
 - This overview: accepted target direction, not an implementation claim.
 - [Canonical milestones](../roadmap/milestones.md): single M0–M4 implementation plan.
 - [ADR index and numbering policy](../adr/README.md): unique three-digit identifiers;
-  001–005 remain accepted and 006–010 record extensions and decision lineage.
+  001–005 remain accepted, 006–010 record extensions and decision lineage, and
+  011 proposes the Gemini Live compatibility target.
 
 ## References
 - [Canonical milestones](../roadmap/milestones.md)
