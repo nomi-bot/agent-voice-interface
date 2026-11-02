@@ -38,10 +38,40 @@ Retrieved 2026-11-01.
 | [Gemini Enterprise Agent Platform best practices](https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/live-api/best-practices) | Transparent resumption and example WebSocket error codes | Retrieved 2026-11-01 |
 | [google-genai 2.34.0 on PyPI](https://pypi.org/project/google-genai/2.34.0/) | SDK release, Python requirement, removal planned for SDK 3 | Released 2026-10-29 |
 
-The pinned package was installed and inspected with CPython 3.12.3. No
-`GEMINI_API_KEY` was available in that environment, so none of the model codes
-below were confirmed with a live `BidiGenerateContent` session. The smoke
-harness therefore refuses to embed or default a model id.
+The pinned package was installed and inspected with CPython 3.12.3. The smoke
+harness still refuses to embed or default a model id.
+
+## What was measured
+
+On 2026-11-01, after AI Studio billing was restored, the project owner ran the
+smoke on commit `ea48f67` with `google-genai==2.34.0` and
+`GEMINI_LIVE_MODEL=gemini-3.8-live`. The redacted result recorded on PR #9 was
+`status=passed model=gemini-3.8-live audio_bytes=34562 transcript=true resumption_handle=true`.
+An earlier run the same day failed with API error 1011 (prepayment credits
+depleted) and did not print the key.
+
+That result measures one completed Developer API text turn for that model code:
+the session produced spoken audio bytes, an output transcript, and a resumption
+handle. It does not measure sample rate, latency, resampling into the 16 kHz
+AVIP profile, renewal across `GoAway`, or a tool round-trip. The 24 kHz output
+rate remains the capabilities-guide contract, not a measured rate.
+
+## What stays documentation-only
+
+The matrix and the limits below are copied from the sources in the table. The
+measured turn did not exercise them:
+
+- Tool `behavior` (`BLOCKING` versus `NON_BLOCKING`) and which scheduling token
+  the model accepts (`INTERRUPT` on the pinned SDK enum, `INTERRUPTED` on the
+  3.8 model page). The smoke registers no tools and fails closed if a tool call
+  arrives. A tool handshake is deferred to JEV-23; this spike does not treat
+  tool behavior as verified.
+- Vertex resumption lifetimes. The Cloud pages disagree with each other and
+  with the Developer API's 2-hour handle.
+- Connection and session durations (about 10 minutes per connection, 15 minutes
+  of audio without compression, 2 minutes with video, 2-hour Developer API
+  handles).
+- Extended thinking, the 3.1 preview, and the 2.5 preview.
 
 The Live API product is still labeled Preview on the capabilities guide and the
 WebSockets reference. The 3.8 Live model page separately calls
@@ -57,14 +87,14 @@ compatibility target. Keep the long-lived API key on the server. Pass
 the smoke onto Vertex.
 
 Do not put a model id in Python. Operators set `GEMINI_LIVE_MODEL` to a model
-code from this record. The documented candidate for the first JEV-23 live run
-is the stable low-latency code on the [Gemini 3.8 Live model page](https://ai.google.dev/gemini-api/docs/models/gemini-3.8-live):
+code from this record. The code exercised in the measured turn is the stable
+low-latency id on the [Gemini 3.8 Live model page](https://ai.google.dev/gemini-api/docs/models/gemini-3.8-live):
 `gemini-3.8-live`. That page describes it as the default low-latency voice
 model, with both blocking and non-blocking function calls. Extended thinking
 adds background reasoning and drops blocking calls and scheduling. The 3.1
 preview is legacy and synchronous only. The 2.5 preview is access-limited for
-new projects. JEV-23 still has to run the credentialed smoke against the chosen
-code before the provider can claim that model.
+new projects. The measured turn does not make those tool claims true for the
+provider. JEV-23 still has to confirm function behavior on the selected model.
 
 SDK methods used by the smoke, and intended for JEV-23, are the ones the 2.34.0
 changelog says to keep: `send_client_content`, `send_realtime_input`,
@@ -87,7 +117,7 @@ output-audio transcription.
 
 | Variant | Documented model code | Channel | Live voice | Tools documented for this variant | Async function calls | Session notes | Spike disposition |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| Gemini 3.8 Live | `gemini-3.8-live` | Stable | Yes. Text, images, audio in. Text and audio out. Input limit 131,072. Output limit 65,536. | Function calling and Search grounding. Code execution, Google Maps, URL context, and structured outputs are not supported. | Model page: `NON_BLOCKING` is the default. `BLOCKING` remains available. Scheduling tokens named there are `SILENT`, `WHEN_IDLE`, and `INTERRUPTED`. | Same Developer API limits as the session guide. Omit `thinking_level`. `proactive_audio: false` returns an error. Affective dialog is removed. | Candidate for `GEMINI_LIVE_MODEL`. Not a code default. |
+| Gemini 3.8 Live | `gemini-3.8-live` | Stable | Yes. Text, images, audio in. Text and audio out. Input limit 131,072. Output limit 65,536. | Function calling and Search grounding. Code execution, Google Maps, URL context, and structured outputs are not supported. | Model page: `NON_BLOCKING` is the default. `BLOCKING` remains available. Scheduling tokens named there are `SILENT`, `WHEN_IDLE`, and `INTERRUPTED`. These tool claims are documentation-only. | Same Developer API limits as the session guide. Omit `thinking_level`. `proactive_audio: false` returns an error. Affective dialog is removed. Session durations are documentation-only. | Text turn measured 2026-11-01 (audio, transcript, resumption handle). Not a code default. |
 | Gemini 3.8 Live Extended Thinking | `gemini-3.8-live-extended-thinking` | Stable | Yes. Same input and output classes and token limits as 3.8 Live. | Function calling is async only. Search grounding is supported. | `NON_BLOCKING` only. `BLOCKING` returns a hard error. Function scheduling is not supported. `thinking_level` is `low`, `medium`, or `high`. | `turn_complete` does not mean idle. Read `interaction_status` (`IN_PROGRESS` or `IDLE`). | Poor fit for the M1 latency path and for a single `tool_result` scheduling policy. |
 | Gemini 3.1 Flash Live Preview | `gemini-3.1-flash-live-preview` | Preview, legacy | Yes. Same token limits. `thinking_level` includes `minimal`. | Function calling. Search is listed for this preview on the tools page. | Not supported. The model waits for the tool response before it speaks. | Capabilities guide: proactive audio and affective dialog are not supported. | Legacy. The model page says to move to 3.8 Live. |
 | Gemini 2.5 Flash Live Preview | `gemini-2.5-flash-native-audio-preview-12-2025` | Preview | Yes. Output token limit 8,192. | Tools page: function calling, synchronous and asynchronous, and Search. | Tools page says both modes. That page's support table does not list the 3.8 models. | Models index: new projects should leave 2.5; access is limited to prior users. | Out of the new AVI path. |
@@ -238,8 +268,8 @@ Implementing the provider in this change would mix an unverified live run into
 the gateway. Calling Vertex from the same smoke would follow a resumption
 contract the Cloud pages do not state consistently. Pinning a version range
 instead of `2.34.0` would let a later 2.x release change enum wire values
-without a failing test. Embedding the 3.8 model code would hide the fact that
-this environment never completed a live session.
+without a failing test. Embedding the 3.8 model code would hide operator
+selection. The measured turn supplied that code through the environment.
 
 ## Consequences
 
@@ -257,8 +287,8 @@ working Gemini voice path.
 
 ## Review trigger
 
-Replace this record, or add a successor, when JEV-23 finishes a credentialed
-smoke, when `google-genai` 3 removes the deprecated Live methods, or when
-Google resolves the `INTERRUPT` / `INTERRUPTED` wording. A failed live smoke
-for `gemini-3.8-live` is a reason to pick another row in the matrix, not a
-reason to hardcode a different id.
+Replace this record, or add a successor, when JEV-23 finishes the tool
+handshake, when `google-genai` 3 removes the deprecated Live methods, or when
+Google resolves the `INTERRUPT` / `INTERRUPTED` wording. A later failed live
+smoke for `gemini-3.8-live` is a reason to pick another row in the matrix, not
+a reason to hardcode a different id.

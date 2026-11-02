@@ -202,6 +202,43 @@ class GeminiLiveSpikeTests(unittest.TestCase):
         self.assertTrue(signal.resumption_handle_present)
         self.assertNotIn("handle-secret", repr(signal))
 
+    def test_audio_bytes_follow_parts_when_data_is_empty(self):
+        class _Blob:
+            def __init__(self, data):
+                self.data = data
+
+        class _Part:
+            def __init__(self, data):
+                self.inline_data = _Blob(data)
+
+        class _Turn:
+            def __init__(self, parts):
+                self.parts = parts
+
+        class _Content:
+            def __init__(self, turn):
+                self.model_turn = turn
+
+        class _Message:
+            def __init__(self, data, parts):
+                self.data = data
+                self.server_content = _Content(_Turn(parts))
+                self.tool_call_cancellation = None
+                self.go_away = None
+                self.tool_call = None
+                self.session_resumption_update = None
+
+        parts_only = _Message(b"", [_Part(b"\x01\x00"), _Part(b"\x02\x00")])
+        signal = read_signal(parts_only)
+        self.assertEqual(signal.audio_bytes, 4)
+        self.assertEqual(signal.kind, "audio")
+
+        mirrored = _Message(b"\x01\x00", [_Part(b"\x01\x00")])
+        self.assertEqual(read_signal(mirrored).audio_bytes, 2)
+
+        data_only = _Message(b"\x01\x00\x03\x00", [])
+        self.assertEqual(read_signal(data_only).audio_bytes, 4)
+
     def test_live_round_trip_when_configured(self):
         import os
 

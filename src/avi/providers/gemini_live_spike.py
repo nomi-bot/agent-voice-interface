@@ -197,6 +197,32 @@ def _enum_value(value: object) -> str | None:
     return str(raw)
 
 
+def _inline_pcm_length(content: object) -> int:
+    """Sum inline PCM parts. The bytes themselves are not retained."""
+
+    turn = getattr(content, "model_turn", None) if content is not None else None
+    parts = getattr(turn, "parts", None) if turn is not None else None
+    total = 0
+    for part in parts or ():
+        blob = getattr(part, "inline_data", None)
+        payload = getattr(blob, "data", None) if blob is not None else None
+        if type(payload) is bytes:
+            total += len(payload)
+    return total
+
+
+def _pcm_byte_count(message: object, content: object) -> int:
+    """Count output PCM without double-counting the SDK's mirrored ``data``."""
+
+    from_parts = _inline_pcm_length(content)
+    if from_parts:
+        return from_parts
+    data = getattr(message, "data", None)
+    if type(data) is bytes:
+        return len(data)
+    return 0
+
+
 def read_signal(message: object) -> ServerSignal:
     """Classify one server message without retaining secrets or audio bytes."""
 
@@ -205,8 +231,7 @@ def read_signal(message: object) -> ServerSignal:
     tool_call = getattr(message, "tool_call", None)
     content = getattr(message, "server_content", None)
     update = getattr(message, "session_resumption_update", None)
-    data = getattr(message, "data", None)
-    audio_bytes = len(data) if type(data) is bytes else 0
+    audio_bytes = _pcm_byte_count(message, content)
     interrupted = bool(content is not None and getattr(content, "interrupted", False))
     turn_complete = bool(content is not None and getattr(content, "turn_complete", False))
     transcript = getattr(content, "output_transcription", None) if content is not None else None
