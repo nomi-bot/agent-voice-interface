@@ -12,8 +12,12 @@ and does not create a VoiceResponse or an AgentRun.
 
 After ``session.ready``, text frames stay on the JSON control plane. One binary
 message is one media frame, passed through ``unpack_frame``. Accepted uplink
-frames are queued and then taken by a mock sink on this session. The same
-driver handles every device label.
+frames are queued. A mock sink takes them when this session has no voice
+provider. When a ``VoiceProvider`` is attached and audio was negotiated, the
+same frames are forwarded to that provider and its 16 kHz audio events come
+back as downlink frames. Provider control events stay in this process. They
+are not written as new AVIP message types. The same driver handles every
+device label.
 """
 import asyncio
 import json
@@ -24,6 +28,7 @@ from typing import NoReturn, Protocol
 
 from avi.telemetry import VoiceTelemetry
 
+from avi.core.events import VoiceEvent
 from avi.core.lifecycle import SessionCloseReason, VoiceSession, VoiceSessionState
 from avi.core.session import SessionLimits
 from avi.protocols.avip import (
@@ -35,6 +40,7 @@ from avi.protocols.avip import (
     session_ready,
 )
 from avi.protocols.media import (
+    MAX_PAYLOAD_BYTES,
     SAMPLE_RATE_HZ,
     SAMPLE_WIDTH_BYTES,
     Direction,
@@ -45,6 +51,7 @@ from avi.protocols.media import (
     pack_frame,
     unpack_frame,
 )
+from avi.providers.base import VoiceProvider
 from avi.transports.base import TransportDisconnected, TransportFrameError
 
 logger = logging.getLogger(__name__)
@@ -84,6 +91,58 @@ class _SessionEnd(Exception):
 # peer drop are disconnects, not failures. Any other local close stays a
 # failure so a new code cannot be recorded as a clean disconnect.
 _FAILURE_CLOSE_CODES = frozenset({1002, 1003, 1013})
+_PROVIDER_CLOSE_CODE = 1011
+_PROVIDER_CLOSE_REASON = "Voice provider unavailable"
+_PROVIDER_TASK = "avip-voice-provider"
+_RECEIVE_TASK = "avip-receive"
+
+
+def _provider_error_code(payload: object) -> str:
+    """Return a loggable provider code. Payloads are not copied."""
+
+    if not isinstance(payload, dict):
+        return "provider_error"
+    code = payload.get("code")
+    if type(code) is not str or not code.isidentifier() or len(code) > 41:
+        return "provider_error"
+    allowed = "abcdefghijklmnopqrstuvwxyz0123456789_"
+    if code[0] not in "abcdefghijklmnopqrstuvwxyz":
+        return "provider_error"
+    if any(character not in allowed for character in code):
+        return "provider_error"
+    return code
+
+
+def _ending_from(
+    done: set[asyncio.Task[None]], provider_task: asyncio.Task[None] | None,
+) -> _SessionEnd | None:
+    """Pick the socket outcome from the first finished session tasks.
+
+    A provider stream that ends on its own closes the AVIP socket. That is
+    not session renewal. Disconnect of the peer stays a disconnect.
+    """
+
+    ending: _SessionEnd | None = None
+    provider_ended = False
+    for task in done:
+        if task.cancelled():
+            continue
+        try:
+            exc = task.exception()
+        except asyncio.CancelledError:
+            continue
+        if isinstance(exc, _SessionEnd):
+            return exc
+        if exc is None and task is provider_task:
+            provider_ended = True
+            continue
+        if isinstance(exc, TransportDisconnected) or exc is None:
+            continue
+        logger.warning("voice session task failed: %s", type(exc).__name__)
+        ending = _SessionEnd(_PROVIDER_CLOSE_CODE, _PROVIDER_CLOSE_REASON)
+    if provider_ended:
+        return _SessionEnd(_PROVIDER_CLOSE_CODE, _PROVIDER_CLOSE_REASON)
+    return ending
 
 
 def _session_close_reason(ending: _SessionEnd | None) -> SessionCloseReason:
@@ -100,14 +159,19 @@ class AvipSession:
                  clock: Callable[[], float] | None = None,
                  wall_clock: Callable[[], float] | None = None,
                  telemetry_path: str = "mock-mirror",
-                 telemetry_scenario: str = "gateway"):
+                 telemetry_scenario: str = "gateway",
+                 provider: VoiceProvider | None = None):
         self.transport = transport
         self.limits = limits
         self.available = available
+        self.provider = provider
         self.session_id: str | None = None
         self.negotiated: Capabilities | None = None
         self.delivery: MediaDelivery | None = None
         self.sink: MockMediaSink | None = None
+        self._provider_open = False
+        self._provider_task: asyncio.Task[None] | None = None
+        self._send_lock = asyncio.Lock()
         self.voice_session = VoiceSession()
         # Session clock is monotonic milliseconds in this process. It is not
         # the client's page clock and not the AVIP media timestamp.
@@ -127,16 +191,18 @@ class AvipSession:
 
     async def _send(self, payload: dict) -> None:
         try:
-            async with asyncio.timeout(self.limits.send_timeout):
-                await self.transport.send(payload)
+            async with self._send_lock:
+                async with asyncio.timeout(self.limits.send_timeout):
+                    await self.transport.send(payload)
         except TimeoutError:
             self.telemetry.note_timeout("send")
             raise _SessionEnd(1013, "Send timeout") from None
 
     async def _send_bytes(self, payload: bytes) -> None:
         try:
-            async with asyncio.timeout(self.limits.send_timeout):
-                await self.transport.send_bytes(payload)
+            async with self._send_lock:
+                async with asyncio.timeout(self.limits.send_timeout):
+                    await self.transport.send_bytes(payload)
         except TimeoutError:
             self.telemetry.note_timeout("send")
             raise _SessionEnd(1013, "Send timeout") from None
@@ -168,10 +234,12 @@ class AvipSession:
         except ProtocolError as exc:
             await self._reject(exc, 1002, "Protocol error")
         ready = session_ready(start, allocate_session_id(), self.available)
-        await self._send(ready)
-        self.session_id = ready["session_id"]
         self.negotiated = Capabilities(**ready["capabilities"])
         self.delivery = MediaDelivery()
+        if self._should_open_provider():
+            await self._open_provider()
+        await self._send(ready)
+        self.session_id = ready["session_id"]
         self.voice_session.activate(
             ready["session_id"],
             request_id=start.request_id,
@@ -179,7 +247,11 @@ class AvipSession:
         )
         self.telemetry.set_session_id(ready["session_id"])
         self.telemetry.mark("session-start")
-        if self.negotiated.audio_input:
+        if self._provider_open:
+            self._provider_task = asyncio.create_task(
+                self._pump_provider(), name=_PROVIDER_TASK,
+            )
+        elif self.negotiated.audio_input:
             self.sink = MockMediaSink(self.delivery)
             self.sink.start()
 
@@ -192,10 +264,12 @@ class AvipSession:
         advances by the payload duration at 16 kHz. Those clocks are not the
         client's clocks.
 
-        Accepted uplink frames are offered to the session mock sink. When the
-        sink is willing, ``reclaim`` takes them before this method reads
-        another frame, on this turn, with no scheduler yield. A paused or
-        metered sink leaves the frame queued. The mirror does not take it.
+        Accepted uplink frames are offered to the session mock sink, unless a
+        voice provider is open. The provider takes the frame on this turn and
+        does not mirror it. When the sink is willing, ``reclaim`` takes them
+        before this method reads another frame, on this turn, with no
+        scheduler yield. A paused or metered sink leaves the frame queued.
+        The mirror does not take it.
         ``queue_full`` is an error envelope and leaves the socket open; the
         refused frame keeps its sequence. Any other frame error is fatal for
         this connection.
@@ -225,6 +299,11 @@ class AvipSession:
         self.telemetry.note_uplink(observed)
         self.telemetry.mark("first-uplink", observed)
         self.telemetry.add_counter("uplinkFrames")
+        if self._provider_open:
+            taken = delivery.take(Direction.AUDIO_UPLINK)
+            if taken is not None:
+                await self._forward_uplink(taken.payload)
+            return
         if self.sink is not None:
             self.sink.reclaim()
         if negotiated.audio_output:
@@ -256,6 +335,213 @@ class AvipSession:
                 )
             await self._send(error_envelope(ProtocolError("unsupported_message_type", "type")))
 
+    def _should_open_provider(self) -> bool:
+        negotiated = self.negotiated
+        return (
+            self.provider is not None
+            and negotiated is not None
+            and (negotiated.audio_input or negotiated.audio_output)
+        )
+
+    async def _open_provider(self) -> None:
+        """Start the provider before ``session.ready``.
+
+        A failed start does not advertise a live audio session. The exception
+        text is not logged: it can carry request details even after redaction.
+        """
+
+        provider = self.provider
+        if provider is None:
+            return
+        try:
+            async with asyncio.timeout(self.limits.operation_timeout):
+                await provider.start()
+        except TimeoutError:
+            logger.warning("voice provider start timed out")
+            raise _SessionEnd(_PROVIDER_CLOSE_CODE, _PROVIDER_CLOSE_REASON) from None
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning("voice provider failed to start")
+            raise _SessionEnd(_PROVIDER_CLOSE_CODE, _PROVIDER_CLOSE_REASON) from None
+        self._provider_open = True
+
+    async def _forward_uplink(self, payload: bytes) -> None:
+        provider = self.provider
+        if provider is None:
+            raise _SessionEnd(_PROVIDER_CLOSE_CODE, _PROVIDER_CLOSE_REASON)
+        try:
+            await provider.send_audio(payload)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning("voice provider rejected uplink")
+            raise _SessionEnd(_PROVIDER_CLOSE_CODE, _PROVIDER_CLOSE_REASON) from None
+
+    async def _pump_provider(self) -> None:
+        """Turn provider events into downlink frames, or into no wire message.
+
+        ``audio`` is packed as AVIP downlink. ``tool_call`` is acknowledged
+        through the port so the provider can continue, and it is not a device
+        action. ``interrupted`` and ``turn_complete`` stop or bound audio
+        inside the provider; this socket has no matching JSON event.
+        ``error`` ends the socket. GoAway is that error path. This task does
+        not open a replacement session.
+        """
+
+        provider = self.provider
+        if provider is None:
+            return
+        try:
+            async for event in provider.events():
+                await self._apply_provider_event(event)
+        except asyncio.CancelledError:
+            raise
+        except _SessionEnd:
+            raise
+        except Exception:
+            logger.warning("voice provider bridge failed")
+            raise _SessionEnd(_PROVIDER_CLOSE_CODE, _PROVIDER_CLOSE_REASON) from None
+
+    async def _apply_provider_event(self, event: VoiceEvent) -> None:
+        kind = event.kind
+        if kind == "audio":
+            if type(event.payload) is not bytes:
+                raise _SessionEnd(_PROVIDER_CLOSE_CODE, _PROVIDER_CLOSE_REASON)
+            await self._emit_provider_audio(event.payload)
+            return
+        if kind == "tool_call":
+            await self._ack_tool(event.payload)
+            return
+        if kind == "error":
+            logger.warning(
+                "voice provider ended the session: %s",
+                _provider_error_code(event.payload),
+            )
+            raise _SessionEnd(_PROVIDER_CLOSE_CODE, _PROVIDER_CLOSE_REASON)
+        if kind in {"interrupted", "turn_complete"}:
+            return
+        logger.warning("voice provider event ignored")
+
+    async def _ack_tool(self, payload: object) -> None:
+        if not isinstance(payload, dict):
+            raise _SessionEnd(_PROVIDER_CLOSE_CODE, _PROVIDER_CLOSE_REASON)
+        call_id = payload.get("id")
+        if type(call_id) is not str or not call_id or len(call_id) > 256:
+            raise _SessionEnd(_PROVIDER_CLOSE_CODE, _PROVIDER_CLOSE_REASON)
+        provider = self.provider
+        if provider is None:
+            raise _SessionEnd(_PROVIDER_CLOSE_CODE, _PROVIDER_CLOSE_REASON)
+        try:
+            await provider.tool_result(call_id, {"output": {}})
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning("voice provider tool result failed")
+            raise _SessionEnd(_PROVIDER_CLOSE_CODE, _PROVIDER_CLOSE_REASON) from None
+
+    async def _emit_provider_audio(self, payload: bytes) -> None:
+        negotiated = self.negotiated
+        if negotiated is None or not negotiated.audio_output:
+            return
+        if len(payload) == 0 or len(payload) % SAMPLE_WIDTH_BYTES != 0:
+            logger.warning("voice provider audio was not a pcm frame")
+            raise _SessionEnd(_PROVIDER_CLOSE_CODE, _PROVIDER_CLOSE_REASON)
+        offset = 0
+        while offset < len(payload):
+            chunk = payload[offset:offset + MAX_PAYLOAD_BYTES]
+            offset += len(chunk)
+            try:
+                packed = pack_frame(MediaFrame(
+                    Direction.AUDIO_DOWNLINK,
+                    self._downlink_sequence,
+                    self._downlink_timestamp,
+                    chunk,
+                ))
+            except ProtocolError:
+                logger.warning("voice provider downlink frame was rejected")
+                raise _SessionEnd(_PROVIDER_CLOSE_CODE, _PROVIDER_CLOSE_REASON) from None
+            await self._send_bytes(packed)
+            observed = self.telemetry.now()
+            self.telemetry.note_downlink(observed)
+            self.telemetry.mark("first-downlink", observed)
+            self.telemetry.add_counter("downlinkFrames")
+            self._downlink_sequence = next_sequence(self._downlink_sequence)
+            self._downlink_timestamp += _duration_us(chunk)
+
+    async def _wait_until_end(self, receive_task: asyncio.Task[None]) -> _SessionEnd | None:
+        watched = {receive_task}
+        provider_task = self._provider_task
+        if provider_task is not None:
+            watched.add(provider_task)
+        done, _pending = await asyncio.wait(watched, return_when=asyncio.FIRST_COMPLETED)
+        ending = _ending_from(done, provider_task)
+        for task in watched:
+            if not task.done():
+                task.cancel()
+        for task in watched:
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            except _SessionEnd as exc:
+                if ending is None:
+                    ending = exc
+            except TransportDisconnected:
+                pass
+            except Exception as exc:
+                logger.warning("voice session task failed: %s", type(exc).__name__)
+                if ending is None:
+                    ending = _SessionEnd(_PROVIDER_CLOSE_CODE, _PROVIDER_CLOSE_REASON)
+        return ending
+
+    async def _stop_voice(self) -> None:
+        """Cancel the bridge and close the provider, then the mock sink."""
+
+        task = self._provider_task
+        self._provider_task = None
+        if task is not None and not task.done():
+            task.cancel()
+            try:
+                async with asyncio.timeout(self.limits.cleanup_timeout):
+                    await task
+            except TimeoutError:
+                logger.warning("voice provider bridge stop timed out")
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                logger.warning("voice provider bridge stopped")
+        provider = self.provider
+        self.provider = None
+        try:
+            if provider is not None:
+                try:
+                    async with asyncio.timeout(self.limits.cleanup_timeout):
+                        await provider.close()
+                except TimeoutError:
+                    logger.warning("voice provider close timed out")
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.warning("voice provider close failed")
+        finally:
+            sink = self.sink
+            self.sink = None
+            try:
+                if sink is not None:
+                    try:
+                        async with asyncio.timeout(self.limits.cleanup_timeout):
+                            await sink.stop()
+                    except Exception:
+                        logger.exception("Mock media sink cleanup failed")
+            finally:
+                if self.delivery is not None:
+                    self.delivery.clear()
+                self.delivery = None
+                self.session_id = None
+                self.negotiated = None
+                self._provider_open = False
+
     def _finish_telemetry(self) -> None:
         """Snapshot counters once. The log line has no PCM and no credentials."""
         sink = self.sink
@@ -277,15 +563,25 @@ class AvipSession:
 
     async def run(self) -> None:
         ending = None
+        receive_task: asyncio.Task[None] | None = None
         try:
             try:
                 await self._handshake()
-                await self._until_disconnect()
+                receive_task = asyncio.create_task(
+                    self._until_disconnect(), name=_RECEIVE_TASK,
+                )
+                ending = await self._wait_until_end(receive_task)
             except _SessionEnd as exc:
                 ending = exc
             except TransportDisconnected:
                 pass
         finally:
+            if receive_task is not None and not receive_task.done():
+                receive_task.cancel()
+                try:
+                    await receive_task
+                except (asyncio.CancelledError, Exception):
+                    pass
             try:
                 self._finish_telemetry()
             except Exception:
@@ -293,21 +589,9 @@ class AvipSession:
             try:
                 self._end_voice_session(ending)
             finally:
-                sink = self.sink
-                self.sink = None
                 try:
-                    if sink is not None:
-                        try:
-                            async with asyncio.timeout(self.limits.cleanup_timeout):
-                                await sink.stop()
-                        except Exception:
-                            logger.exception("Mock media sink cleanup failed")
+                    await self._stop_voice()
                 finally:
-                    if self.delivery is not None:
-                        self.delivery.clear()
-                    self.delivery = None
-                    self.session_id = None
-                    self.negotiated = None
                     if ending is not None:
                         try:
                             async with asyncio.timeout(self.limits.send_timeout):

@@ -521,7 +521,7 @@ export class BrowserVoice {
       if (!capabilities || !capabilities.audio_input || !capabilities.audio_output) {
         throw voiceError(
           "audio_unavailable",
-          "The gateway did not negotiate audio. Start it with AVIP_MOCK_MEDIA=1.",
+          "The gateway did not negotiate audio. Set GEMINI_API_KEY and GEMINI_LIVE_MODEL, or start it with AVIP_MOCK_MEDIA=1.",
         );
       }
       if (capabilities.robot_actions) {

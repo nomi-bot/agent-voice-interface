@@ -1,9 +1,9 @@
 """Gemini Live adapter for the ``VoiceProvider`` port.
 
-The gateway does not construct this class. ``/ws/avip`` still drains uplink
-with ``MockMediaSink`` and mirrors 16 kHz PCM. A process that wants a Live
-session constructs ``GeminiLiveProvider`` itself and keeps the API key in the
-server environment.
+``/ws/avip`` constructs this class when ``GEMINI_API_KEY`` and
+``GEMINI_LIVE_MODEL`` are both set. Otherwise the socket keeps
+``MockMediaSink`` and the 16 kHz PCM mirror. The API key stays in the server
+environment. This module does not load a dotenv file.
 
 ``GEMINI_API_KEY`` and ``GEMINI_LIVE_MODEL`` follow the spike: a missing key
 does not call the network, a key without a model fails closed, and

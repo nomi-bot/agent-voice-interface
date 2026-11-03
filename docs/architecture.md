@@ -9,7 +9,8 @@ VoiceProvider and AgentAdapter. DeviceAdapter describes hardware capabilities.
 The control plane uses Python asyncio and FastAPI. Current executable scope is a
 local JSON WebSocket with session-owned mock tasks, plus `/ws/avip` for the AVIP
 handshake and mock PCM frames. `VoiceProvider` is implemented by
-`GeminiLiveProvider`, and the AVIP path does not call it. DeviceAdapter remains
+`GeminiLiveProvider`. `/ws/avip` calls it when Live credentials are set.
+DeviceAdapter remains
 a contract only. The Gemini Live compatibility spike is
 [ADR-011](adr/011-gemini-live-compatibility.md); the adapter notes are in
 [the provider record](providers/gemini-live.md). The orchestrator contains no

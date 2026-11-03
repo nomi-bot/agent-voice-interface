@@ -1,5 +1,9 @@
-"""Local-only development gateway. This skeleton has no live voice provider."""
-import os
+"""Local-only development gateway.
+
+``/ws/avip`` mounts the configured voice provider when credentials are
+complete. Otherwise ``AVIP_MOCK_MEDIA=1`` keeps the PCM mirror. A missing
+model does not guess one. The provider key stays in the process environment.
+"""
 from collections.abc import Mapping
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -11,6 +15,7 @@ from avi.agents.mock import MockAgentAdapter
 from avi.core.avip_session import AvipSession
 from avi.core.session import ControlSession, SessionLimits
 from avi.protocols.avip import Capabilities
+from avi.providers.mount import attach_voice, resolve_voice_mount
 from avi.transports.websocket import WebSocketTransport
 
 
@@ -73,33 +78,42 @@ def _browser_file(name: str) -> Path:
 
 
 def development_capabilities(environ: Mapping[str, str] | None = None) -> Capabilities:
-    """Return the features this process can actually negotiate.
+    """Return the audio features this process can honestly advertise.
 
-    The default is none. ``AVIP_MOCK_MEDIA=1`` enables the M0 PCM mirror for
-    every client: audio input and audio output only. It does not enable a
-    voice provider, camera, display, or robot actions. Any other value leaves
-    every capability false.
+    Live credentials and ``AVIP_MOCK_MEDIA=1`` both advertise audio input and
+    audio output. Neither enables camera, display, or robot actions. Any
+    other environment leaves every capability false. Live wins when the key
+    and the model are both set, including when the mock flag is also set.
     """
-    source = os.environ if environ is None else environ
-    if source.get("AVIP_MOCK_MEDIA") == "1":
-        return Capabilities(audio_input=True, audio_output=True)
-    return Capabilities()
+    return resolve_voice_mount(environ).capabilities
 
 
-AVIP_CAPABILITIES = development_capabilities()
+# Tests patch this to drive a partial capability set. It applies only when
+# the resolved mode is not configured. Mock and Live ignore it and use
+# ``resolve_voice_mount`` instead, so an import-time snapshot cannot hide a
+# later credential or force Live during a mock-media test.
+AVIP_CAPABILITIES = Capabilities()
 
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "voice": "not_implemented", "agent": "mock"}
+    """Report the voice path this process will mount. No key and no model id."""
+    mount = resolve_voice_mount()
+    return {
+        "status": "ok",
+        "voice": mount.mode,
+        "voice_reason": mount.reason,
+        "agent": "mock",
+    }
 
 
 @app.get("/voice")
 async def voice_demo():
     """Serve the local microphone and speaker page.
 
-    The page is a development client for ``/ws/avip``. It is not a voice
-    provider. ``AVIP_MOCK_MEDIA=1`` is what negotiates the PCM mirror.
+    The page is a development client for ``/ws/avip``. It does not hold a
+    provider key. Live audio is negotiated when the process is configured;
+    ``AVIP_MOCK_MEDIA=1`` negotiates the PCM mirror when Live is not.
     """
     return FileResponse(
         _browser_file("voice.html"),
@@ -149,8 +163,14 @@ async def avip_session(websocket: WebSocket):
     await websocket.accept()
     app.state.active_sessions += 1
     try:
+        voice = attach_voice(AVIP_CAPABILITIES)
         await AvipSession(
-            WebSocketTransport(websocket), SESSION_LIMITS, AVIP_CAPABILITIES
+            WebSocketTransport(websocket),
+            SESSION_LIMITS,
+            voice.capabilities,
+            provider=voice.provider,
+            telemetry_path=voice.telemetry_path,
+            telemetry_scenario=voice.telemetry_scenario,
         ).run()
     finally:
         app.state.active_sessions -= 1

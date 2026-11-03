@@ -1,6 +1,6 @@
 # ADR-011: Gemini Live API compatibility
 
-**Status:** Proposed. This records the M1/A0 spike. JEV-23 later added `GeminiLiveProvider` on the existing `VoiceProvider` port. That adapter does not change the measurements below. Its interface, tool handshake, and resampling notes are in [the provider record](../providers/gemini-live.md). `/ws/avip` still does not open a Live session.
+**Status:** Proposed. This records the M1/A0 spike. JEV-23 later added `GeminiLiveProvider` on the existing `VoiceProvider` port, and JEV-32 mounts that adapter on `/ws/avip` when both Live variables are set. The adapter does not change the measurements below. Its interface, tool handshake, and resampling notes are in [the provider record](../providers/gemini-live.md).
 
 **Date:** 2026-11-01
 

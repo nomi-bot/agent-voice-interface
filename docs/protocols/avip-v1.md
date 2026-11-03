@@ -1,10 +1,13 @@
 # AVIP v1 protocol outline
 Status: **Draft — `/ws/avip` serves the session handshake and, once audio
-input is negotiated, binary media frames. A mock sink drains accepted uplink
-frames so a continuous sender is not stuck at the queue bound. It is not a
-voice provider. The development gateway advertises no capabilities unless
-`AVIP_MOCK_MEDIA=1`, which enables the M0 PCM mirror for every client.
-VoiceSession, VoiceResponse and AgentRun transitions live in
+input is negotiated, binary media frames. When `GEMINI_API_KEY` and
+`GEMINI_LIVE_MODEL` are both set, accepted uplink PCM is sent to
+`GeminiLiveProvider` and downlink frames are that provider's 16 kHz audio.
+Provider control events are not new AVIP messages. When Live is not
+configured, `AVIP_MOCK_MEDIA=1` still enables the M0 PCM mirror and a mock
+sink drains accepted uplink frames. Otherwise the gateway advertises no
+capabilities. `GET /health` reports `voice` as `live`, `mock`, or
+`not_configured`. VoiceSession, VoiceResponse and AgentRun transitions live in
 `avi.core.lifecycle`. This socket uses VoiceSession for connecting, active
 and closed only. It does not enter reconnecting, and it does not create a
 voice response or an agent run. The remaining control and event messages are
@@ -73,11 +76,11 @@ discards the session when the socket ends. Device labels do not select a path.
 - A `session.ready` reply echoes the validated request ID and includes the
   gateway-assigned session ID and all five negotiated boolean capabilities.
   An empty capability set is valid for a control-only client. Gateway defaults
-  must remain false until corresponding integrations are enabled. The development
-  gateway enables none of them, so `/ws/avip` answers with every capability false.
-  `AVIP_MOCK_MEDIA=1` is the one development exception: it advertises audio input
-  and audio output together, for every client, and still advertises no camera,
-  display, or robot actions.
+  must remain false until corresponding integrations are enabled. With Live
+  unset and `AVIP_MOCK_MEDIA` unset, `/ws/avip` answers with every capability
+  false. `AVIP_MOCK_MEDIA=1` and a complete Live configuration each advertise
+  audio input and audio output together, for every client, and still advertise
+  no camera, display, or robot actions. Live wins when both are set.
 - The synthetic [handshake fixtures](../../tests/fixtures/avip-v1-handshake.json)
   negotiate against audio support so browser and headless examples can share one
   expectation. Conformance tests apply that availability on the shared route.
@@ -234,15 +237,24 @@ the sink takes a frame. A later sequence, while the refused one was not
 accepted, is `sequence_anomaly`. Once a slot is free, the refused sequence
 can be submitted unchanged. `AVIP_MOCK_MEDIA=1` turns the mirror on for every
 client by advertising audio input and audio output, and the sink runs
-whenever audio input was negotiated. The default development gateway
-advertises neither, so binary frames still close with 1003.
+whenever audio input was negotiated, unless Live is configured. A complete
+Live configuration advertises the same two audio bits and does not mirror:
+uplink PCM is `send_audio`, and provider audio is packed as `audio_downlink`
+on the gateway clock (sequence and timestamp start at 0). Chunks larger than
+the payload cap are split. `interrupted`, `turn_complete`, and `tool_call`
+are not written as JSON. A tool call is acknowledged in-process with an empty
+result and does not actuate anything. A provider error, including GoAway,
+closes the socket with `1011` and the reason `Voice provider unavailable`.
+That close is not session renewal. The default development gateway, with
+Live unset and `AVIP_MOCK_MEDIA` unset, advertises neither audio bit, so
+binary frames still close with 1003.
 
 ## Open design decisions (M0)
 Settled for this slice: mock PCM profile, header layout, endianness, sequence
 and timestamp rules, payload bounds, reject-newest backpressure, socket
 attachment, and wire errors for media failures including `queue_full`. Still open:
 
-- Route framed audio through the gateway to a voice provider. The mock sink drains uplink PCM and drops it. The mirror only checks framing. Neither is a provider.
+- Route framed audio through the gateway to a second voice provider. Gemini Live is mounted when configured. The mock sink and the mirror remain the path when it is not.
 - Negotiate a measured codec and sample rate in the handshake. Real-time resampling, jitter buffering, and concealment wait on that measurement (M1) and on full-duplex recovery (M3).
 - AuthN/AuthZ of devices and robot actions; when and how remote runs can be reattached. The handshake above does not define that policy.
 - Trace context beyond the media clock defined above, and a way to measure

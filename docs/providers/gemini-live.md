@@ -1,9 +1,22 @@
 # Gemini Live provider (JEV-23)
 
 `avi.providers.gemini_live.GeminiLiveProvider` implements the existing
-`VoiceProvider` port. The development gateway does not construct it.
-`/ws/avip` still uses `MockMediaSink` and the 16 kHz PCM mirror.
-`GET /health` still reports `voice: not_implemented` for that process.
+`VoiceProvider` port. `/ws/avip` constructs it when `GEMINI_API_KEY` and
+`GEMINI_LIVE_MODEL` are both set. Uplink PCM goes to `send_audio`. Downlink
+frames are the provider's 16 kHz audio. `interrupted`, `turn_complete`,
+`tool_call`, and `error` stay inside the gateway; they are not new AVIP
+message types. A tool call is answered with an empty `tool_result` so the
+Live session can continue. That acknowledgement does not run a device action.
+
+`GET /health` reports `voice` as `live`, `mock`, or `not_configured`, plus
+`voice_reason` (`configured`, `mock_media`, `model_unconfigured`, or
+`credentials_absent`). The body has no key and no model id.
+
+`AVIP_MOCK_MEDIA=1` is the mirror fallback when the key or the model is
+missing. It does not override a complete Live configuration: unset
+`GEMINI_API_KEY` to force the mirror. A key without a single model token
+does not select a model and does not open a socket. `GOOGLE_API_KEY` is
+ignored. This repository does not load a dotenv file.
 
 The compatibility spike remains `avi.providers.gemini_live_spike` and
 [ADR-011](../adr/011-gemini-live-compatibility.md). This page is the adapter
@@ -24,7 +37,8 @@ actuation.
 | `close` | Cancels the uplink and downlink tasks and closes the socket. Idempotent. |
 
 `submit_text` exists on the class for the gated smoke. It is not part of
-`VoiceProvider`, and the gateway does not call it.
+`VoiceProvider`, and the gateway does not call it. The mounted session
+forwards microphone PCM only.
 
 Legacy `/ws` still answers `cancel_response` with `unsupported`. Wiring that
 control message to this provider is not part of this change.
@@ -159,10 +173,12 @@ python -m pip install -e '.[dev,gemini-live]'
 python -m unittest discover -s tests -v
 ```
 
-On this workspace, CPython 3.12.3, that run was **181 tests, 179 passed, 2
-skipped**. The skips are `test_live_round_trip_when_configured` and
-`test_live_duplex_and_tool_handshake_when_configured`, both because
-`GEMINI_API_KEY` was unset. The spike module exits 2 in that case.
+On this workspace, CPython 3.12.3, that run was **214 tests, 210 passed, 4
+skipped**. The skips are `test_live_round_trip_when_configured`,
+`test_live_duplex_and_tool_handshake_when_configured`,
+`test_provider_path_report_when_the_provider_exists`, and
+`test_configured_gateway_accepts_uplink`, all because `GEMINI_API_KEY` was
+unset. The spike module exits 2 in that case.
 
 With a key and a model code from ADR-011, the same discovery runs the live
 tests. There is no separate command required. To run only the adapter module's
@@ -195,17 +211,69 @@ audio event on one machine. It is not a cross-host or product SLO.
 - The provider does not call an agent and does not actuate hardware.
 - The gateway bind and origin allowlist are unchanged.
 
+## Gateway soak
+
+Nomi can run this after the mount is merged. Headphones on. The page plays
+16 kHz AVIP frames. Live output is resampled to that profile in the gateway
+before it is framed. Stop playback is still local: it does not send
+`cancel_response`, and a GoAway closes the socket instead of renewing the
+Live session.
+
+```sh
+python -m pip install -e '.[dev,gemini-live]'
+export GEMINI_API_KEY='your-key'
+export GEMINI_LIVE_MODEL='gemini-3.8-live'
+unset AVIP_MOCK_MEDIA
+python -m uvicorn avi.main:app --host 127.0.0.1 --port 8000 --ws-max-size 16384 --ws-max-queue 16
+```
+
+`GEMINI_LIVE_MODEL` has no default. `gemini-3.8-live` is the code measured in
+ADR-011; use the operator's pin if it differs. Then:
+
+```sh
+curl -sS http://127.0.0.1:8000/health
+```
+
+`voice` is `live` and `voice_reason` is `configured`. Open
+`http://127.0.0.1:8000/voice` on that same machine, allow the microphone, and
+talk. Downlink audio is the provider, not a microphone echo.
+
+Mock mirror, with Live left unconfigured:
+
+```sh
+env -u GEMINI_API_KEY -u GEMINI_LIVE_MODEL AVIP_MOCK_MEDIA=1 \
+  python -m uvicorn avi.main:app --host 127.0.0.1 --port 8000 --ws-max-size 16384 --ws-max-queue 16
+```
+
+Health then reports `voice` `mock`. Unset both the key and `AVIP_MOCK_MEDIA`
+and health reports `voice` `not_configured`. A key with no model reports
+`voice_reason` `model_unconfigured` and does not call Google.
+
+The credentialed gateway check skips when `GEMINI_API_KEY` is unset and fails
+closed when the model pin is missing:
+
+```sh
+python -m unittest tests.test_avip_live_mount.LiveGatewayTests.test_configured_gateway_accepts_uplink -v
+```
+
+The adapter's duplex and tool-handshake test is still:
+
+```sh
+python -m unittest tests.test_gemini_live_provider.ProviderContractTests.test_live_duplex_and_tool_handshake_when_configured -v
+```
+
 ## Deferred
 
-- Mounting the provider on `/ws/avip`. The mock mirror and `MockMediaSink` stay
-  the gateway path.
-- Automatic session renewal across `GoAway`.
+- Automatic session renewal across `GoAway`. The socket closes. The next
+  connection is a new Live session.
 - Choosing between the SDK scheduling token `INTERRUPT` and the model-page
   token `INTERRUPTED`. Neither is sent.
 - A credentialed measurement of `BLOCKING` versus `NON_BLOCKING`, and of
   `first_audio_ms`, on the operator's model.
 - Copying transcript text onto an event.
-- Connecting legacy `/ws` `cancel_response` to this provider.
-- Telemetry work from a later issue, if it is not already on `main`. This
-  change does not add a telemetry channel. The browser page still records the
-  same four local timing names, plus `skippedMediaUs` for dropped uplink audio.
+- Connecting legacy `/ws` `cancel_response` to this provider. That socket
+  still reports `voice: false`.
+- Filling telemetry `cost` from a Live session. The mounted gateway sets
+  `path` to `provider` and `scenario` to `gemini-live`. The report still has
+  no PCM, key, or resumption handle. The browser page still records the same
+  local timing names, plus `skippedMediaUs` for dropped uplink audio.

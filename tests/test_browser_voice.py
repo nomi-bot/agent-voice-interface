@@ -58,8 +58,11 @@ class VoicePageTests(unittest.IsolatedAsyncioTestCase):
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:8000"
         ) as client:
+            from avi.providers.mount import resolve_voice_mount
             health = await client.get("/health")
-            self.assertEqual(health.json()["voice"], "not_implemented")
+            mount = resolve_voice_mount()
+            self.assertEqual(health.json()["voice"], mount.mode)
+            self.assertEqual(health.json()["voice_reason"], mount.reason)
             page = await client.get("/voice")
             self.assertEqual(page.status_code, 200)
             self.assertIn("text/html", page.headers["content-type"])
@@ -84,6 +87,8 @@ class VoicePageTests(unittest.IsolatedAsyncioTestCase):
         log = tempfile.TemporaryFile(mode="w+")
         env = os.environ.copy()
         env["AVIP_MOCK_MEDIA"] = "1"
+        for name in ("GEMINI_API_KEY", "GEMINI_LIVE_MODEL", "GOOGLE_API_KEY"):
+            env.pop(name, None)
         process = subprocess.Popen(
             [
                 sys.executable, "-m", "uvicorn", "avi.main:app",
