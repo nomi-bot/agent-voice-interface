@@ -3,10 +3,15 @@
 `avi.providers.gemini_live.GeminiLiveProvider` implements the existing
 `VoiceProvider` port. `/ws/avip` constructs it when `GEMINI_API_KEY` and
 `GEMINI_LIVE_MODEL` are both set. Uplink PCM goes to `send_audio`. Downlink
-frames are the provider's 16 kHz audio. `interrupted`, `turn_complete`,
-`tool_call`, and `error` stay inside the gateway; they are not new AVIP
-message types. A tool call is answered with an empty `tool_result` so the
-Live session can continue. That acknowledgement does not run a device action.
+frames are the provider's 16 kHz audio. `turn_complete` and `tool_call` stay inside the gateway. A tool call is
+answered with an empty `tool_result` and does not run a device action.
+`interrupted` becomes one versioned AVIP message,
+`response.interrupted`, naming the playback generation to flush. Audio after
+that message is the next generation. Downlink is paced in 20 ms frames and
+kept under a 160 ms horizon so the browser speaker does not drop a burst.
+An idle `cancel_response` does not arm a hold: suppression starts only after
+this generation has emitted audio, and a second cancel does not wait for a
+second `turn_complete`.
 
 `GET /health` reports `voice` as `live`, `mock`, or `not_configured`, plus
 `voice_reason` (`configured`, `mock_media`, `model_unconfigured`, or
@@ -173,12 +178,14 @@ python -m pip install -e '.[dev,gemini-live]'
 python -m unittest discover -s tests -v
 ```
 
-On this workspace, CPython 3.12.3, that run was **214 tests, 210 passed, 4
+On this workspace, CPython 3.12.3, that run was **218 tests, 212 passed, 6
 skipped**. The skips are `test_live_round_trip_when_configured`,
 `test_live_duplex_and_tool_handshake_when_configured`,
-`test_provider_path_report_when_the_provider_exists`, and
-`test_configured_gateway_accepts_uplink`, all because `GEMINI_API_KEY` was
-unset. The spike module exits 2 in that case.
+`test_provider_path_report_when_the_provider_exists`,
+`test_silence_uplink_stays_open`,
+`test_configured_gateway_returns_speech`, and
+`test_live_interrupt_keeps_the_next_response`, all because `GEMINI_API_KEY`
+was unset. The spike module exits 2 in that case.
 
 With a key and a model code from ADR-011, the same discovery runs the live
 tests. There is no separate command required. To run only the adapter module's
@@ -214,10 +221,11 @@ audio event on one machine. It is not a cross-host or product SLO.
 ## Gateway soak
 
 Nomi can run this after the mount is merged. Headphones on. The page plays
-16 kHz AVIP frames. Live output is resampled to that profile in the gateway
-before it is framed. Stop playback is still local: it does not send
-`cancel_response`, and a GoAway closes the socket instead of renewing the
-Live session.
+16 kHz AVIP frames. Live output is resampled to that profile, split into
+20 ms frames, and paced so the speaker horizon stays under 160 ms. Stop
+playback is still local: it does not send `cancel_response`. A provider
+interrupt sends `response.interrupted` and the page flushes only that
+generation. A GoAway closes the socket instead of renewing the Live session.
 
 ```sh
 python -m pip install -e '.[dev,gemini-live]'
@@ -249,11 +257,25 @@ Health then reports `voice` `mock`. Unset both the key and `AVIP_MOCK_MEDIA`
 and health reports `voice` `not_configured`. A key with no model reports
 `voice_reason` `model_unconfigured` and does not call Google.
 
-The credentialed gateway check skips when `GEMINI_API_KEY` is unset and fails
-closed when the model pin is missing:
+The credentialed gateway checks skip when `GEMINI_API_KEY` is unset and fail
+closed when the model pin is missing. Speech is elicited with the server-side
+`AVIP_LIVE_ELICIT` text turn (not an AVIP message). Silence stays a separate
+smoke and does not require downlink. The interrupt check cancels the active
+generation and requires the next spoken turn.
 
 ```sh
-python -m unittest tests.test_avip_live_mount.LiveGatewayTests.test_configured_gateway_accepts_uplink -v
+python -m unittest \
+  tests.test_avip_live_mount.LiveGatewayTests.test_configured_gateway_returns_speech \
+  tests.test_avip_live_mount.LiveGatewayTests.test_live_interrupt_keeps_the_next_response \
+  tests.test_avip_live_mount.LiveGatewayTests.test_silence_uplink_stays_open \
+  -v
+```
+
+The browser interruption check does not need a microphone or a key. It is
+part of `voice-check.mjs`, which the unit suite already runs:
+
+```sh
+node clients/browser/voice-check.mjs
 ```
 
 The adapter's duplex and tool-handshake test is still:

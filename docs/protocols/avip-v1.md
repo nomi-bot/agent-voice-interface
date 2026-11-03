@@ -41,12 +41,21 @@ Any future device action requires independent device-side authorization and safe
 checks; see [ADR-010](../adr/010-robot-client-integration.md).
 
 The session-start shape above is validated by the handshake contract and accepted
-on `/ws/avip`. Other proposed control types are session.end, playback.stop,
-response.cancel and agent.run.cancel; proposed events include transcript.delta,
-agent.run.status, response.interrupted and error. Those other messages are not
-implemented. After a session is ready, a JSON object whose type is not
-`session.start` returns `unsupported_message_type` and leaves the ready session
-in place.
+on `/ws/avip`. The server also sends `response.interrupted` when a provider
+generation is cut off:
+
+```json
+{"protocol":"avip/1","type":"response.interrupted","generation":0}
+```
+
+`protocol` is the AVIP version. `generation` is the playback generation to
+flush. Audio that arrives after the message is the next generation and must
+still play. The message has no PCM and no provider fields. Other proposed
+control types are session.end, playback.stop, response.cancel and
+agent.run.cancel; proposed events include transcript.delta and
+agent.run.status. Those other messages are not implemented. After a session
+is ready, a client JSON object whose type is not `session.start` returns
+`unsupported_message_type` and leaves the ready session in place.
 
 ## Initial session handshake contract
 
@@ -240,10 +249,13 @@ client by advertising audio input and audio output, and the sink runs
 whenever audio input was negotiated, unless Live is configured. A complete
 Live configuration advertises the same two audio bits and does not mirror:
 uplink PCM is `send_audio`, and provider audio is packed as `audio_downlink`
-on the gateway clock (sequence and timestamp start at 0). Chunks larger than
-the payload cap are split. `interrupted`, `turn_complete`, and `tool_call`
-are not written as JSON. A tool call is acknowledged in-process with an empty
-result and does not actuate anything. A provider error, including GoAway,
+on the gateway clock (sequence and timestamp start at 0). Provider audio is
+split into nominal 20 ms frames. The gateway sends a frame only while less
+than 160 ms of audio is ahead of a monotonic clock, and it keeps at most
+eight unsent frames. `response.interrupted` drops the unsent frames of that
+generation. `turn_complete` and `tool_call` are not written as JSON. A tool
+call is acknowledged in-process with an empty result and does not actuate
+anything. A provider error, including GoAway,
 closes the socket with `1011` and the reason `Voice provider unavailable`.
 That close is not session renewal. The default development gateway, with
 Live unset and `AVIP_MOCK_MEDIA` unset, advertises neither audio bit, so

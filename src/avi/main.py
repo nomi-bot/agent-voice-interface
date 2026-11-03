@@ -171,6 +171,7 @@ async def avip_session(websocket: WebSocket):
             provider=voice.provider,
             telemetry_path=voice.telemetry_path,
             telemetry_scenario=voice.telemetry_scenario,
+            elicit=voice.elicit,
         ).run()
     finally:
         app.state.active_sessions -= 1

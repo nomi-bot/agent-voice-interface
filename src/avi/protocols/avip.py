@@ -147,6 +147,23 @@ def negotiate_capabilities(requested: Capabilities, available: Capabilities) -> 
     })
 
 
+def response_interrupted(generation: int) -> dict:
+    """Tell the client to flush one playback generation.
+
+    ``protocol`` is the AVIP version. ``generation`` is the generation that
+    was playing. Audio sent after this message is the next generation. The
+    payload has no PCM and no provider detail.
+    """
+
+    if type(generation) is not int or not 0 <= generation <= 1_000_000:
+        raise ValueError("generation")
+    return {
+        "protocol": PROTOCOL,
+        "type": "response.interrupted",
+        "generation": generation,
+    }
+
+
 def session_ready(start: SessionStart, session_id: str, available: Capabilities) -> dict:
     """Build a correlated reply using an identifier allocated by the gateway.
 

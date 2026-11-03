@@ -387,6 +387,46 @@ class ProviderContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(done.kind, "turn_complete")
         await provider.close()
 
+    async def test_idle_cancel_does_not_drop_the_next_turn(self):
+        session = FakeSession()
+        provider = _provider(session)
+        await provider.start()
+        iterator = provider.events()
+        await provider.cancel_response()
+        await provider.cancel_response()
+        self.assertEqual(session.turns, [])
+        fresh = _pcm(4, 480)
+        await session.push(_audio_message(fresh, turn_complete=True))
+        first = await anext(iterator)
+        self.assertEqual(first.kind, "audio")
+        self.assertTrue(first.payload.startswith((4).to_bytes(2, "little", signed=True)))
+        boundary = await anext(iterator)
+        self.assertEqual(boundary.kind, "turn_complete")
+        await provider.close()
+
+    async def test_repeated_cancel_does_not_hold_the_following_turn(self):
+        session = FakeSession()
+        provider = _provider(session)
+        await provider.start()
+        iterator = provider.events()
+        await session.push(_audio_message(_pcm(3, 480)))
+        first = await anext(iterator)
+        self.assertEqual(first.kind, "audio")
+        await provider.cancel_response()
+        await provider.cancel_response()
+        self.assertEqual(session.turns, [(None, True)])
+        interrupted = await anext(iterator)
+        self.assertEqual(interrupted.kind, "interrupted")
+        await session.push(_Message(server_content=_Content([], turn_complete=True)))
+        boundary = await anext(iterator)
+        self.assertEqual(boundary.kind, "turn_complete")
+        fresh = _pcm(11, 480)
+        await session.push(_audio_message(fresh, turn_complete=True))
+        nxt = await anext(iterator)
+        self.assertEqual(nxt.kind, "audio")
+        self.assertTrue(nxt.payload.startswith((11).to_bytes(2, "little", signed=True)))
+        await provider.close()
+
     async def test_turn_boundary_does_not_keep_the_previous_tail(self):
         session = FakeSession()
         provider = _provider(session)
@@ -443,6 +483,9 @@ class ProviderContractTests(unittest.IsolatedAsyncioTestCase):
             connector=connect_cancel,
         )
         await provider.start()
+        iterator = provider.events()
+        await session.push(_audio_message(_pcm(2, 480)))
+        self.assertEqual((await anext(iterator)).kind, "audio")
         with self.assertLogs("avi.providers.gemini_live", level="WARNING") as captured:
             with self.assertRaises(ProviderSessionError) as caught:
                 await provider.cancel_response()

@@ -23,11 +23,13 @@ import asyncio
 import json
 import logging
 import secrets
-from collections.abc import Callable
+import time
+from collections.abc import Awaitable, Callable
 from typing import NoReturn, Protocol
 
 from avi.telemetry import VoiceTelemetry
 
+from avi.core.downlink import DownlinkPacer
 from avi.core.events import VoiceEvent
 from avi.core.lifecycle import SessionCloseReason, VoiceSession, VoiceSessionState
 from avi.core.session import SessionLimits
@@ -40,7 +42,6 @@ from avi.protocols.avip import (
     session_ready,
 )
 from avi.protocols.media import (
-    MAX_PAYLOAD_BYTES,
     SAMPLE_RATE_HZ,
     SAMPLE_WIDTH_BYTES,
     Direction,
@@ -160,17 +161,24 @@ class AvipSession:
                  wall_clock: Callable[[], float] | None = None,
                  telemetry_path: str = "mock-mirror",
                  telemetry_scenario: str = "gateway",
-                 provider: VoiceProvider | None = None):
+                 provider: VoiceProvider | None = None,
+                 elicit: str | None = None,
+                 monotonic: Callable[[], float] | None = None,
+                 sleeper: Callable[[float], Awaitable[None]] | None = None):
         self.transport = transport
         self.limits = limits
         self.available = available
         self.provider = provider
+        self.elicit = elicit
+        self._monotonic = time.monotonic if monotonic is None else monotonic
+        self._sleeper = asyncio.sleep if sleeper is None else sleeper
         self.session_id: str | None = None
         self.negotiated: Capabilities | None = None
         self.delivery: MediaDelivery | None = None
         self.sink: MockMediaSink | None = None
         self._provider_open = False
         self._provider_task: asyncio.Task[None] | None = None
+        self._pacer: DownlinkPacer | None = None
         self._send_lock = asyncio.Lock()
         self.voice_session = VoiceSession()
         # Session clock is monotonic milliseconds in this process. It is not
@@ -248,9 +256,16 @@ class AvipSession:
         self.telemetry.set_session_id(ready["session_id"])
         self.telemetry.mark("session-start")
         if self._provider_open:
+            self._pacer = DownlinkPacer(
+                self._send_downlink_frame,
+                self._send,
+                monotonic=self._monotonic,
+                sleeper=self._sleeper,
+            )
             self._provider_task = asyncio.create_task(
                 self._pump_provider(), name=_PROVIDER_TASK,
             )
+            await self._elicit()
         elif self.negotiated.audio_input:
             self.sink = MockMediaSink(self.delivery)
             self.sink.start()
@@ -378,48 +393,64 @@ class AvipSession:
             logger.warning("voice provider rejected uplink")
             raise _SessionEnd(_PROVIDER_CLOSE_CODE, _PROVIDER_CLOSE_REASON) from None
 
-    async def _pump_provider(self) -> None:
-        """Turn provider events into downlink frames, or into no wire message.
+    async def _elicit(self) -> None:
+        """One server-side text turn. Not an AVIP message and not logged."""
 
-        ``audio`` is packed as AVIP downlink. ``tool_call`` is acknowledged
-        through the port so the provider can continue, and it is not a device
-        action. ``interrupted`` and ``turn_complete`` stop or bound audio
-        inside the provider; this socket has no matching JSON event.
-        ``error`` ends the socket. GoAway is that error path. This task does
-        not open a replacement session.
+        text = self.elicit
+        provider = self.provider
+        if not text or provider is None:
+            return
+        submit = getattr(provider, "_submit_text", None)
+        if submit is None:
+            return
+        try:
+            await submit(text)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning("voice provider prompt failed")
+            raise _SessionEnd(_PROVIDER_CLOSE_CODE, _PROVIDER_CLOSE_REASON) from None
+
+    async def _pump_provider(self) -> None:
+        """Pace provider audio and map control events onto AVIP.
+
+        ``audio`` becomes nominal 20 ms downlink frames, held to a 160 ms
+        horizon. ``interrupted`` is ``response.interrupted`` for that
+        generation and drops only unsent frames. ``turn_complete`` stays
+        inside the gateway. ``error`` ends the socket. GoAway is that path
+        and does not open a replacement session.
         """
 
         provider = self.provider
-        if provider is None:
+        pacer = self._pacer
+        if provider is None or pacer is None:
             return
         try:
-            async for event in provider.events():
-                await self._apply_provider_event(event)
+            await pacer.run(provider.events(), self._on_provider_control)
         except asyncio.CancelledError:
             raise
         except _SessionEnd:
             raise
+        except ValueError:
+            logger.warning("voice provider audio was not a pcm frame")
+            raise _SessionEnd(_PROVIDER_CLOSE_CODE, _PROVIDER_CLOSE_REASON) from None
         except Exception:
             logger.warning("voice provider bridge failed")
             raise _SessionEnd(_PROVIDER_CLOSE_CODE, _PROVIDER_CLOSE_REASON) from None
 
-    async def _apply_provider_event(self, event: VoiceEvent) -> None:
-        kind = event.kind
-        if kind == "audio":
-            if type(event.payload) is not bytes:
-                raise _SessionEnd(_PROVIDER_CLOSE_CODE, _PROVIDER_CLOSE_REASON)
-            await self._emit_provider_audio(event.payload)
-            return
-        if kind == "tool_call":
+    async def _on_provider_control(self, event: VoiceEvent) -> None:
+        if event.kind == "tool_call":
             await self._ack_tool(event.payload)
             return
-        if kind == "error":
+        if event.kind == "error":
             logger.warning(
                 "voice provider ended the session: %s",
                 _provider_error_code(event.payload),
             )
             raise _SessionEnd(_PROVIDER_CLOSE_CODE, _PROVIDER_CLOSE_REASON)
-        if kind in {"interrupted", "turn_complete"}:
+        if event.kind == "turn_complete":
+            return
+        if event.kind == "interrupted":
             return
         logger.warning("voice provider event ignored")
 
@@ -440,34 +471,30 @@ class AvipSession:
             logger.warning("voice provider tool result failed")
             raise _SessionEnd(_PROVIDER_CLOSE_CODE, _PROVIDER_CLOSE_REASON) from None
 
-    async def _emit_provider_audio(self, payload: bytes) -> None:
+    async def _send_downlink_frame(self, chunk: bytes) -> None:
         negotiated = self.negotiated
         if negotiated is None or not negotiated.audio_output:
             return
-        if len(payload) == 0 or len(payload) % SAMPLE_WIDTH_BYTES != 0:
+        if len(chunk) == 0 or len(chunk) % SAMPLE_WIDTH_BYTES != 0:
             logger.warning("voice provider audio was not a pcm frame")
             raise _SessionEnd(_PROVIDER_CLOSE_CODE, _PROVIDER_CLOSE_REASON)
-        offset = 0
-        while offset < len(payload):
-            chunk = payload[offset:offset + MAX_PAYLOAD_BYTES]
-            offset += len(chunk)
-            try:
-                packed = pack_frame(MediaFrame(
-                    Direction.AUDIO_DOWNLINK,
-                    self._downlink_sequence,
-                    self._downlink_timestamp,
-                    chunk,
-                ))
-            except ProtocolError:
-                logger.warning("voice provider downlink frame was rejected")
-                raise _SessionEnd(_PROVIDER_CLOSE_CODE, _PROVIDER_CLOSE_REASON) from None
-            await self._send_bytes(packed)
-            observed = self.telemetry.now()
-            self.telemetry.note_downlink(observed)
-            self.telemetry.mark("first-downlink", observed)
-            self.telemetry.add_counter("downlinkFrames")
-            self._downlink_sequence = next_sequence(self._downlink_sequence)
-            self._downlink_timestamp += _duration_us(chunk)
+        try:
+            packed = pack_frame(MediaFrame(
+                Direction.AUDIO_DOWNLINK,
+                self._downlink_sequence,
+                self._downlink_timestamp,
+                chunk,
+            ))
+        except ProtocolError:
+            logger.warning("voice provider downlink frame was rejected")
+            raise _SessionEnd(_PROVIDER_CLOSE_CODE, _PROVIDER_CLOSE_REASON) from None
+        await self._send_bytes(packed)
+        observed = self.telemetry.now()
+        self.telemetry.note_downlink(observed)
+        self.telemetry.mark("first-downlink", observed)
+        self.telemetry.add_counter("downlinkFrames")
+        self._downlink_sequence = next_sequence(self._downlink_sequence)
+        self._downlink_timestamp += _duration_us(chunk)
 
     async def _wait_until_end(self, receive_task: asyncio.Task[None]) -> _SessionEnd | None:
         watched = {receive_task}

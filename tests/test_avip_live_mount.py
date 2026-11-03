@@ -138,6 +138,19 @@ class FakeProvider:
             await self._progress.wait()
 
 
+class VirtualClock:
+    """Pacer clock. sleep() advances time and does not wait on the wall clock."""
+
+    def __init__(self):
+        self.t = 0.0
+
+    def monotonic(self) -> float:
+        return self.t
+
+    async def sleep(self, seconds: float) -> None:
+        self.t += seconds
+
+
 class Gate:
     def __init__(self):
         self.inbox = asyncio.Queue()
@@ -256,7 +269,11 @@ class VoiceMountTests(unittest.TestCase):
 
 
 class ProviderBridgeTests(unittest.IsolatedAsyncioTestCase):
-    def _session(self, transport, provider, available=AUDIO, limits=None):
+    def _session(self, transport, provider, available=AUDIO, limits=None, clock=None):
+        kwargs = {}
+        if clock is not None:
+            kwargs["monotonic"] = clock.monotonic
+            kwargs["sleeper"] = clock.sleep
         return AvipSession(
             transport,
             SessionLimits() if limits is None else limits,
@@ -264,6 +281,7 @@ class ProviderBridgeTests(unittest.IsolatedAsyncioTestCase):
             provider=provider,
             telemetry_path="provider" if provider is not None else "mock-mirror",
             telemetry_scenario="gemini-live" if provider is not None else "gateway",
+            **kwargs,
         )
 
     async def _ready(self, transport, message=None):
@@ -327,33 +345,50 @@ class ProviderBridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(uplink.hex(), report)
         self.assertNotIn(downlink.hex(), report)
 
-    async def test_provider_events_do_not_become_avip_json(self):
+    async def test_interrupt_flushes_queued_audio_and_the_next_response_plays(self):
+        from avip_client.playback import PlaybackBuffer
+
         fake = FakeProvider()
         transport = Gate()
         task = asyncio.create_task(self._session(transport, fake).run())
         try:
             await self._ready(transport)
-            await fake.emit(VoiceEvent(kind="interrupted", payload={"source": "server"}))
+            first = b"\x11\x00" * 320
+            second = b"\x22\x00" * 320
+            await fake.emit(VoiceEvent(kind="audio", payload=first))
+            queued = unpack_frame(await asyncio.wait_for(transport.next_item(), 1))
+            self.assertEqual(queued.payload, first)
             await fake.emit(VoiceEvent(
-                kind="turn_complete",
-                payload={"reason": None, "transcript_present": False},
+                kind="interrupted",
+                payload={"source": "server", "detail": SECRET, "handle": HANDLE},
             ))
-            await fake.emit(VoiceEvent(
-                kind="tool_call",
-                payload={"id": "call-1", "name": "avi_ack", "args": {"note": SECRET, "handle": HANDLE}},
-            ))
-            await fake.wait_until(lambda: len(fake.tool_results) == 1)
-            await fake.emit(VoiceEvent(kind="audio", payload=b"\x01\x00"))
-            frame = unpack_frame(await asyncio.wait_for(transport.next_item(), 1))
-            self.assertEqual(frame.payload, b"\x01\x00")
-            self.assertEqual(fake.tool_results, [("call-1", {"output": {}})])
-            self.assertEqual(_text_types(transport.sent), ["session.ready"])
+            event = await asyncio.wait_for(transport.next_item(), 1)
+            self.assertEqual(event, {
+                "protocol": "avip/1",
+                "type": "response.interrupted",
+                "generation": 0,
+            })
+            speaker = PlaybackBuffer()
+            self.assertTrue(speaker.enqueue(queued.payload))
+            self.assertTrue(speaker.apply(event))
+            self.assertEqual(speaker.queued, [])
+            self.assertEqual(speaker.generation, 1)
+            await fake.emit(VoiceEvent(kind="audio", payload=second))
+            nxt = unpack_frame(await asyncio.wait_for(transport.next_item(), 1))
+            self.assertEqual(nxt.payload, second)
+            self.assertTrue(speaker.enqueue(nxt.payload))
+            self.assertEqual(speaker.generation, 1)
+            self.assertFalse(speaker.apply({
+                "protocol": "avip/1",
+                "type": "response.interrupted",
+                "generation": 0,
+            }))
+            self.assertEqual(speaker.queued, [second])
             rendered = json.dumps(transport.sent, default=lambda item: item.hex())
             self.assertNotIn(SECRET, rendered)
             self.assertNotIn(HANDLE, rendered)
             self.assertNotIn("tool_call", rendered)
-            self.assertNotIn("turn_complete", rendered)
-            self.assertNotIn("interrupted", rendered)
+            self.assertNotIn("\"source\"", rendered)
         finally:
             await transport.inbox.put(None)
             await task
@@ -393,22 +428,30 @@ class ProviderBridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(transport.closed, (1011, "Voice provider unavailable"))
         self.assertFalse(any(isinstance(item, bytes) for item in transport.sent))
 
-    async def test_downlink_longer_than_one_frame_is_split(self):
+    async def test_multisecond_burst_is_intact_and_stays_inside_160ms(self):
         fake = FakeProvider()
+        clock = VirtualClock()
         transport = Gate()
-        task = asyncio.create_task(self._session(transport, fake).run())
+        session = self._session(transport, fake, clock=clock)
+        task = asyncio.create_task(session.run())
+        payload = bytes((index // 640) % 251 for index in range(96_000))
         try:
             await self._ready(transport)
-            payload = b"\x00\x01" * 4097
             await fake.emit(VoiceEvent(kind="audio", payload=payload))
-            first = unpack_frame(await asyncio.wait_for(transport.next_item(), 1))
-            second = unpack_frame(await asyncio.wait_for(transport.next_item(), 1))
-            self.assertEqual(first.sequence, 0)
-            self.assertEqual(first.timestamp_us, 0)
-            self.assertEqual(len(first.payload), 8192)
-            self.assertEqual(second.sequence, 1)
-            self.assertEqual(second.timestamp_us, 4096 * 1_000_000 // 16_000)
-            self.assertEqual(first.payload + second.payload, payload)
+            got = bytearray()
+            while len(got) < len(payload):
+                frame = unpack_frame(await asyncio.wait_for(transport.next_item(), 1))
+                self.assertLessEqual(len(frame.payload), 640)
+                self.assertGreater(len(frame.payload), 0)
+                self.assertEqual(len(frame.payload) % 2, 0)
+                got.extend(frame.payload)
+            self.assertEqual(bytes(got), payload)
+            pacer = session._pacer
+            self.assertIsNotNone(pacer)
+            self.assertLessEqual(pacer.max_ahead_us, 160_000)
+            self.assertLessEqual(pacer.high_water, 8)
+            self.assertGreater(clock.t, 2.0)
+            self.assertLess(clock.t, 4.0)
         finally:
             await transport.inbox.put(None)
             await task
@@ -575,23 +618,43 @@ def _scrub(text, secret):
     return text
 
 
-class LiveGatewayTests(unittest.IsolatedAsyncioTestCase):
-    async def test_configured_gateway_accepts_uplink(self):
-        """One real Live session on /ws/avip. Skips when the key is unset."""
+def _require_live_credentials():
+    key = os.environ.get("GEMINI_API_KEY")
+    if not isinstance(key, str) or not key.strip():
+        return None
+    model = os.environ.get("GEMINI_LIVE_MODEL")
+    if not isinstance(model, str) or not model.strip():
+        raise AssertionError(
+            "GEMINI_API_KEY is set but GEMINI_LIVE_MODEL is unset; "
+            "refusing to choose a model"
+        )
+    return key
 
-        key = os.environ.get("GEMINI_API_KEY")
-        if not isinstance(key, str) or not key.strip():
+
+def _assert_downlink_frame(message):
+    from avi.protocols.media import Direction as AudioDirection
+    if not hasattr(message, "payload"):
+        raise AssertionError("downlink was not an audio frame")
+    payload = message.payload
+    if type(payload) is not bytes or len(payload) < 2 or len(payload) % 2 != 0:
+        raise AssertionError("downlink frame was empty or not pcm")
+    if message.direction is not AudioDirection.AUDIO_DOWNLINK and message.direction != 2:
+        raise AssertionError("downlink frame had the wrong direction")
+    return payload
+
+
+class LiveGatewayTests(unittest.IsolatedAsyncioTestCase):
+    async def test_silence_uplink_stays_open(self):
+        """Silence is not a prompt. The socket must stay up. Audio is optional."""
+
+        key = _require_live_credentials()
+        if key is None:
             self.skipTest("GEMINI_API_KEY is unset; integration skipped")
-        model = os.environ.get("GEMINI_LIVE_MODEL")
-        if not isinstance(model, str) or not model.strip():
-            self.fail(
-                "GEMINI_API_KEY is set but GEMINI_LIVE_MODEL is unset; "
-                "refusing to choose a model"
-            )
         port = _free_port()
         log = tempfile.TemporaryFile(mode="w+")
         env = os.environ.copy()
         env.pop("AVIP_MOCK_MEDIA", None)
+        env.pop("AVIP_LIVE_ELICIT", None)
         process = subprocess.Popen(
             [
                 sys.executable, "-m", "uvicorn", "avi.main:app",
@@ -603,53 +666,178 @@ class LiveGatewayTests(unittest.IsolatedAsyncioTestCase):
             stderr=subprocess.STDOUT,
             cwd=ROOT,
         )
-        url = f"ws://127.0.0.1:{port}/ws/avip"
         try:
             await _wait_health(port, process, log, key)
             from avip_client import AvipClient
 
             async with AvipClient(
-                url,
-                request_id="req-live-mount",
+                f"ws://127.0.0.1:{port}/ws/avip",
+                request_id="req-live-silence",
+                device_id="headless-sim-001",
+                capabilities={"audio_input": True, "audio_output": True},
+            ) as client:
+                await asyncio.wait_for(client.start(), 45)
+                await client.send_uplink(bytes(640))
+                try:
+                    message = await asyncio.wait_for(client.recv(), 2)
+                except TimeoutError:
+                    message = None
+                if message is not None and not isinstance(message, dict):
+                    _assert_downlink_frame(message)
+            if process.poll() is not None:
+                raise AssertionError("gateway exited after silence")
+        except AssertionError:
+            raise
+        except Exception:
+            log.seek(0)
+            raise AssertionError(_scrub(log.read(), key) or "silence uplink failed") from None
+        finally:
+            _stop_process(process)
+            log.close()
+
+    async def test_configured_gateway_returns_speech(self):
+        """Elicit one spoken word through /ws/avip and require a real frame."""
+
+        key = _require_live_credentials()
+        if key is None:
+            self.skipTest("GEMINI_API_KEY is unset; integration skipped")
+        port = _free_port()
+        log = tempfile.TemporaryFile(mode="w+")
+        env = os.environ.copy()
+        env.pop("AVIP_MOCK_MEDIA", None)
+        env["AVIP_LIVE_ELICIT"] = "Say the single word yes."
+        process = subprocess.Popen(
+            [
+                sys.executable, "-m", "uvicorn", "avi.main:app",
+                "--host", "127.0.0.1", "--port", str(port),
+                "--ws-max-size", "16384", "--ws-max-queue", "16",
+            ],
+            env=env,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            cwd=ROOT,
+        )
+        try:
+            await _wait_health(port, process, log, key)
+            from avip_client import AvipClient
+
+            async with AvipClient(
+                f"ws://127.0.0.1:{port}/ws/avip",
+                request_id="req-live-speech",
                 device_id="headless-sim-001",
                 capabilities={"audio_input": True, "audio_output": True},
             ) as client:
                 ready = await asyncio.wait_for(client.start(), 45)
-                self.assertTrue(ready["capabilities"]["audio_input"])
-                self.assertTrue(ready["capabilities"]["audio_output"])
-                self.assertFalse(ready["capabilities"]["robot_actions"])
-                encoded = json.dumps(ready)
-                self.assertNotIn("gemini", encoded.lower())
-                if key in encoded:
-                    self.fail("session.ready included a credential")
-                await client.send_uplink(bytes(640))
-                downlink = 0
-                try:
-                    while True:
-                        message = await asyncio.wait_for(client.recv(), 2)
-                        if isinstance(message, dict):
-                            self.fail("unexpected control message during live uplink")
-                        downlink += 1
-                        if downlink > 8:
-                            break
-                except TimeoutError:
-                    pass
-            self.assertGreaterEqual(downlink, 0)
+                if key in json.dumps(ready):
+                    raise AssertionError("session.ready included a credential")
+                payload = await _first_downlink(client, 30)
+                if len(payload) < 2:
+                    raise AssertionError("speech downlink was empty")
+            log.seek(0)
+            text = log.read()
+            if key in text:
+                raise AssertionError("gateway log included a credential")
+            if process.poll() is not None:
+                raise AssertionError("gateway exited after speech")
         except AssertionError:
             raise
-        except Exception as exc:
+        except Exception:
             log.seek(0)
-            detail = _scrub(log.read(), key)
-            raise AssertionError(detail or type(exc).__name__) from None
+            raise AssertionError(_scrub(log.read(), key) or "speech downlink failed") from None
         finally:
-            if process.poll() is None:
-                process.terminate()
-                try:
-                    process.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-                    process.wait(timeout=5)
+            _stop_process(process)
             log.close()
+
+    async def test_live_interrupt_keeps_the_next_response(self):
+        """Cancel an active generation, then hear the following one."""
+
+        key = _require_live_credentials()
+        if key is None:
+            self.skipTest("GEMINI_API_KEY is unset; integration skipped")
+        from avi.providers.gemini_live import GeminiLiveProvider
+
+        provider = GeminiLiveProvider()
+        transport = Gate()
+        session = AvipSession(
+            transport,
+            SessionLimits(),
+            AUDIO,
+            provider=provider,
+            telemetry_path="provider",
+            telemetry_scenario="gemini-live",
+        )
+        task = asyncio.create_task(session.run())
+        try:
+            await transport.inbox.put(("text", _start()))
+            ready = await asyncio.wait_for(transport.next_item(), 45)
+            if ready.get("type") != "session.ready":
+                raise AssertionError("live session was not ready")
+            await provider._submit_text("Say the single word yes.")
+            await _first_gateway_downlink(transport, 30)
+            await provider.cancel_response()
+            event = await _next_json(transport, 20)
+            if event.get("type") != "response.interrupted" or event.get("generation") != 0:
+                raise AssertionError("live interrupt was not signaled")
+            if key in json.dumps(event):
+                raise AssertionError("interrupt event included a credential")
+            await provider._submit_text("Say the single word no.")
+            await _first_gateway_downlink(transport, 30)
+        except AssertionError:
+            raise
+        finally:
+            await transport.inbox.put(None)
+            await task
+        self.assertEqual(provider._state, "closed")
+        self.assertEqual(_provider_tasks(), [])
+
+
+async def _first_downlink(client, seconds):
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        remaining = deadline - time.monotonic()
+        message = await asyncio.wait_for(client.recv(), remaining)
+        if isinstance(message, dict):
+            if message.get("type") == "response.interrupted":
+                continue
+            raise AssertionError("unexpected control message before speech")
+        return _assert_downlink_frame(message)
+    raise AssertionError("no speech downlink")
+
+
+async def _first_gateway_downlink(transport, seconds):
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        item = await asyncio.wait_for(transport.next_item(), deadline - time.monotonic())
+        if isinstance(item, dict):
+            if item.get("type") == "response.interrupted":
+                continue
+            if item.get("type") == "session.ready":
+                continue
+            raise AssertionError("unexpected control message before speech")
+        frame = unpack_frame(item)
+        if len(frame.payload) < 2 or len(frame.payload) % 2 != 0:
+            raise AssertionError("speech downlink was empty or not pcm")
+        return frame.payload
+    raise AssertionError("no speech downlink")
+
+
+async def _next_json(transport, seconds):
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        item = await asyncio.wait_for(transport.next_item(), deadline - time.monotonic())
+        if isinstance(item, dict) and item.get("type") != "session.ready":
+            return item
+    raise AssertionError("no interrupt event")
+
+
+def _stop_process(process):
+    if process.poll() is None:
+        process.terminate()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=5)
 
 
 async def _wait_health(port, process, log, secret):

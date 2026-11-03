@@ -58,6 +58,7 @@ class SessionVoice:
     telemetry_path: str
     telemetry_scenario: str
     mount: VoiceMount
+    elicit: str | None = None
 
 
 def attach_voice(
@@ -80,10 +81,23 @@ def attach_voice(
             "provider",
             "gemini-live",
             mount,
+            _elicit(environ if environ is not None else os.environ),
         )
     if mount.mode == MODE_MOCK:
         return SessionVoice(None, mount.capabilities, "mock-mirror", "gateway", mount)
     return SessionVoice(None, unconfigured, "mock-mirror", "gateway", mount)
+
+
+def _elicit(environ: Mapping[str, str]) -> str | None:
+    """Optional server-side text turn. The value is not logged."""
+
+    raw = environ.get("AVIP_LIVE_ELICIT")
+    if type(raw) is not str:
+        return None
+    text = raw.strip()
+    if not text or len(text) > 200:
+        return None
+    return text
 
 
 def resolve_voice_mount(environ: Mapping[str, str] | None = None) -> VoiceMount:
