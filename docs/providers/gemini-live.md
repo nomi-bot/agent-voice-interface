@@ -178,7 +178,7 @@ python -m pip install -e '.[dev,gemini-live]'
 python -m unittest discover -s tests -v
 ```
 
-On this workspace, CPython 3.12.3, that run was **218 tests, 212 passed, 6
+On this workspace, CPython 3.12.3, that run was **220 tests, 214 passed, 6
 skipped**. The skips are `test_live_round_trip_when_configured`,
 `test_live_duplex_and_tool_handshake_when_configured`,
 `test_provider_path_report_when_the_provider_exists`,

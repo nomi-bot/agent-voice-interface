@@ -1,11 +1,16 @@
 """Pace provider audio onto AVIP downlink.
 
-The browser speaker drops a frame once 160 ms is already scheduled. Provider
-chunks can be 256 ms, and a faster-than-real-time burst would overflow that
-horizon even if it were split. This pacer emits nominal 20 ms frames and
-keeps the amount sent less than 160 ms ahead of a monotonic clock. Eight
-unsent frames is the queue bound. An interruption drops only the unsent
-frames of the current generation.
+The browser speaker drops a frame once 160 ms is already scheduled. This
+pacer emits nominal 20 ms frames and keeps the playout deadline less than
+160 ms ahead of the monotonic clock. After a gap the deadline is behind
+the clock, so the next answer starts from now instead of spending the
+silence as send credit.
+
+Pacer-owned audio (pending bytes, the eight-frame queue, and one in-flight
+frame) stays within ``MAX_BACKLOG_BYTES``. Further audio events while that
+budget is full are dropped so an interruption or other control event can
+still be read. The current event is copied in slices as room appears, so a
+paced multi-second answer is not truncated.
 """
 
 from __future__ import annotations
@@ -17,40 +22,33 @@ import time
 
 from avi.core.events import VoiceEvent
 from avi.protocols.avip import response_interrupted
-from avi.protocols.media import NOMINAL_CHUNK_US, NOMINAL_PAYLOAD_BYTES, SAMPLE_RATE_HZ, SAMPLE_WIDTH_BYTES
+from avi.protocols.media import NOMINAL_CHUNK_US, NOMINAL_PAYLOAD_BYTES, SAMPLE_WIDTH_BYTES
 
 
 AHEAD_US = 8 * NOMINAL_CHUNK_US
 _QUEUE_FRAMES = 8
-
-
-def split_pcm(payload: bytes) -> list[bytes]:
-    """Split PCM into nominal 20 ms frames. The tail may be shorter."""
-
-    if not payload:
-        return []
-    step = NOMINAL_PAYLOAD_BYTES
-    return [payload[offset:offset + step] for offset in range(0, len(payload), step)]
+# Eight queued frames plus the one frame the sender has removed from the queue.
+MAX_BACKLOG_BYTES = (_QUEUE_FRAMES + 1) * NOMINAL_PAYLOAD_BYTES
 
 
 def frame_duration_us(payload: bytes) -> int:
     samples = len(payload) // SAMPLE_WIDTH_BYTES
-    return samples * 1_000_000 // SAMPLE_RATE_HZ
+    return samples * 1_000_000 // 16_000
 
 
 def pace_wait_us(
-    sent_us: int, elapsed_us: int, *, ahead_us: int = AHEAD_US, quantum_us: int = NOMINAL_CHUNK_US,
+    deadline_us: int, now_us: int, *, ahead_us: int = AHEAD_US, quantum_us: int = NOMINAL_CHUNK_US,
 ) -> int:
-    """Return how long to wait so the next frame still fits under ``ahead_us``.
+    """Wait so ``deadline_us`` stays under ``ahead_us`` ahead of ``now_us``.
 
-    A wait of one quantum is the minimum once the horizon is already full.
-    One microsecond would admit a frame and immediately fill the speaker again.
+    The caller rebases a deadline that is already behind ``now_us``. A full
+    horizon waits at least one 20 ms quantum so the speaker gains a slot.
     """
 
-    if sent_us - elapsed_us < ahead_us:
+    lead = deadline_us - now_us
+    if lead < ahead_us:
         return 0
-    deficit = sent_us - elapsed_us - ahead_us + 1
-    return max(deficit, quantum_us)
+    return max(lead - ahead_us + 1, quantum_us)
 
 
 class DownlinkPacer:
@@ -72,74 +70,84 @@ class DownlinkPacer:
         self.generation = 0
         self.high_water = 0
         self.max_ahead_us = 0
-        self.sent_us = 0
-        self._origin: float | None = None
+        self.max_backlog_bytes = 0
+        self.overflow_bytes = 0
+        self._pending = bytearray()
+        self._queued_bytes = 0
+        self._inflight_bytes = 0
+        self._deadline_us: int | None = None
         self._space = asyncio.Event()
         self._space.set()
         self._sender: asyncio.Task[None] | None = None
         self._sender_error: BaseException | None = None
         self._closed = False
 
-    def _elapsed_us(self) -> int:
-        if self._origin is None:
-            return 0
-        return max(0, int((self._monotonic() - self._origin) * 1_000_000))
+    def backlog_bytes(self) -> int:
+        """Bytes this pacer is holding, not audio still inside the provider."""
+
+        return len(self._pending) + self._queued_bytes + self._inflight_bytes
+
+    def _now_us(self) -> int:
+        return int(self._monotonic() * 1_000_000)
+
+    def _rebase(self) -> int:
+        """Pull a deadline that underran back to the current clock."""
+
+        now = self._now_us()
+        if self._deadline_us is None or self._deadline_us < now:
+            self._deadline_us = now
+        return now
+
+    def _note_backlog(self) -> None:
+        self.max_backlog_bytes = max(self.max_backlog_bytes, self.backlog_bytes())
 
     def _note_queued(self) -> None:
         self.high_water = max(self.high_water, self.queue.qsize())
 
-    def _drop_queued(self) -> None:
+    def _flush_pending(self, *, drain: bool = False) -> None:
+        while len(self._pending) >= 2:
+            if not drain and len(self._pending) < NOMINAL_PAYLOAD_BYTES:
+                return
+            step = min(NOMINAL_PAYLOAD_BYTES, len(self._pending))
+            step -= step % 2
+            if step < 2:
+                return
+            chunk = bytes(self._pending[:step])
+            try:
+                self.queue.put_nowait((self.generation, chunk))
+            except asyncio.QueueFull:
+                self._space.clear()
+                return
+            del self._pending[:step]
+            self._queued_bytes += len(chunk)
+            self._note_queued()
+            self._note_backlog()
+
+    def _discard_audio(self) -> None:
+        self._pending.clear()
         while True:
             try:
                 self.queue.get_nowait()
             except asyncio.QueueEmpty:
                 break
+        self._queued_bytes = 0
+        self._note_backlog()
         self._space.set()
-
-    def enqueue_available(self, payload: bytes, generation: int) -> bytes:
-        """Queue as many frames as fit. Return the unsent tail.
-
-        A generation change drops the tail. The caller keeps it only while
-        ``generation`` is still current.
-        """
-
-        if generation != self.generation or self._closed:
-            return b""
-        view = memoryview(payload)
-        offset = 0
-        while offset < len(view):
-            if generation != self.generation:
-                return b""
-            chunk = bytes(view[offset:offset + NOMINAL_PAYLOAD_BYTES])
-            try:
-                self.queue.put_nowait((generation, chunk))
-            except asyncio.QueueFull:
-                self._space.clear()
-                if generation != self.generation:
-                    return b""
-                try:
-                    self.queue.put_nowait((generation, chunk))
-                except asyncio.QueueFull:
-                    return bytes(view[offset:])
-            self._note_queued()
-            offset += len(chunk)
-        return b""
 
     async def interrupt(self) -> int:
         """Drop unsent audio for this generation and tell the client."""
 
         flushed = self.generation
         self.generation += 1
-        self._drop_queued()
-        self._origin = None
-        self.sent_us = 0
-        self._space.set()
+        self._discard_audio()
+        self._deadline_us = None
         await self._send_json(response_interrupted(flushed))
         return flushed
 
-    async def _wait_room(self, generation: int, frame_us: int) -> bool:
+    async def _wait_room(self, generation: int) -> bool:
         while generation == self.generation and not self._closed:
-            delay = pace_wait_us(self.sent_us, self._elapsed_us())
+            now = self._rebase()
+            delay = pace_wait_us(self._deadline_us or now, now)
             if delay <= 0:
                 return True
             await self._sleeper(min(delay, NOMINAL_CHUNK_US) / 1_000_000)
@@ -149,23 +157,32 @@ class DownlinkPacer:
         try:
             while not self._closed:
                 item = await self.queue.get()
-                self._space.set()
                 if item is None or self._closed:
                     return
                 generation, chunk = item
-                if generation != self.generation:
-                    continue
-                duration = frame_duration_us(chunk)
-                if not await self._wait_room(generation, duration):
-                    continue
-                if self._origin is None:
-                    self._origin = self._monotonic()
-                ahead = self.sent_us - self._elapsed_us()
-                if ahead < 0:
-                    ahead = 0
-                self.max_ahead_us = max(self.max_ahead_us, ahead)
-                await self._send_frame(chunk)
-                self.sent_us += duration
+                self._queued_bytes -= len(chunk)
+                self._inflight_bytes += len(chunk)
+                self._space.set()
+                self._note_backlog()
+                try:
+                    if generation != self.generation:
+                        continue
+                    duration = frame_duration_us(chunk)
+                    if not await self._wait_room(generation):
+                        continue
+                    now = self._rebase()
+                    lead = (self._deadline_us or now) - now
+                    if lead < 0:
+                        lead = 0
+                    self.max_ahead_us = max(self.max_ahead_us, lead)
+                    await self._send_frame(chunk)
+                    if self._deadline_us is None:
+                        self._deadline_us = self._now_us()
+                    self._deadline_us += duration
+                finally:
+                    self._inflight_bytes = max(0, self._inflight_bytes - len(chunk))
+                    self._note_backlog()
+                    self._space.set()
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -183,6 +200,20 @@ class DownlinkPacer:
         except StopAsyncIteration:
             return None
 
+    def _copy_room(self, payload: memoryview, offset: int) -> int:
+        """Copy what fits into pending. Return the new offset."""
+
+        room = MAX_BACKLOG_BYTES - self.backlog_bytes()
+        if room < 2 or offset >= len(payload):
+            return offset
+        take = min(room, len(payload) - offset)
+        take -= take % 2
+        if take < 2:
+            return offset
+        self._pending.extend(payload[offset:offset + take])
+        self._note_backlog()
+        return offset + take
+
     async def run(
         self,
         events: AsyncIterator[VoiceEvent],
@@ -195,36 +226,49 @@ class DownlinkPacer:
         fetch: asyncio.Task[VoiceEvent | None] | None = asyncio.create_task(
             self._next_event(iterator)
         )
-        pending = b""
-        pending_gen = self.generation
+        audio: memoryview | None = None
+        offset = 0
+        audio_gen = self.generation
         try:
             while True:
                 self._raise_sender()
                 if self._sender is not None and self._sender.done():
                     await self._sender
                     return
-                if pending and pending_gen == self.generation:
-                    pending = self.enqueue_available(pending, pending_gen)
-                if pending and pending_gen == self.generation:
-                    await self._wait_for_space_or_event(fetch)
-                    if fetch is not None and fetch.done():
-                        event = fetch.result()
-                        fetch = asyncio.create_task(self._next_event(iterator))
-                        if event is None:
-                            return
-                        pending, pending_gen = await self._on_event(
-                            event, pending, pending_gen, on_control
-                        )
-                    continue
+                if audio is not None and audio_gen != self.generation:
+                    audio = None
+                if audio is not None:
+                    offset = self._copy_room(audio, offset)
+                    self._flush_pending(drain=offset >= len(audio))
+                    if offset < len(audio):
+                        self._space.clear()
+                        if self.backlog_bytes() < MAX_BACKLOG_BYTES:
+                            continue
+                        await self._wait_for_space_or_event(fetch)
+                        if fetch is not None and fetch.done():
+                            event = fetch.result()
+                            if event is None:
+                                fetch = None
+                                continue
+                            fetch = asyncio.create_task(self._next_event(iterator))
+                            audio, offset, audio_gen = await self._on_event(
+                                event, audio, offset, audio_gen, on_control
+                            )
+                        continue
+                    audio = None
                 if fetch is None:
+                    self._flush_pending(drain=True)
                     return
                 await self._wait_for_event(fetch)
+                if fetch is None or not fetch.done():
+                    continue
                 event = fetch.result()
-                fetch = asyncio.create_task(self._next_event(iterator))
                 if event is None:
+                    self._flush_pending(drain=True)
                     return
-                pending, pending_gen = await self._on_event(
-                    event, pending, pending_gen, on_control
+                fetch = asyncio.create_task(self._next_event(iterator))
+                audio, offset, audio_gen = await self._on_event(
+                    event, audio, offset, audio_gen, on_control
                 )
         finally:
             if fetch is not None and not fetch.done():
@@ -233,9 +277,11 @@ class DownlinkPacer:
                     await fetch
             await asyncio.shield(self.aclose())
 
-    async def _wait_for_space_or_event(self, fetch: asyncio.Task[VoiceEvent | None]) -> None:
+    async def _wait_for_space_or_event(self, fetch: asyncio.Task[VoiceEvent | None] | None) -> None:
         space = asyncio.create_task(self._space.wait())
-        watched = {space, fetch}
+        watched = {space}
+        if fetch is not None:
+            watched.add(fetch)
         if self._sender is not None:
             watched.add(self._sender)
         try:
@@ -260,29 +306,39 @@ class DownlinkPacer:
     async def _on_event(
         self,
         event: VoiceEvent,
-        pending: bytes,
-        pending_gen: int,
+        audio: memoryview | None,
+        offset: int,
+        audio_gen: int,
         on_control: Callable[[VoiceEvent], Awaitable[None]],
-    ) -> tuple[bytes, int]:
+    ) -> tuple[memoryview | None, int, int]:
         if event.kind == "audio":
             payload = event.payload
-            if type(payload) is not bytes or len(payload) % SAMPLE_WIDTH_BYTES != 0:
+            if type(payload) is not bytes or len(payload) % 2 != 0:
                 raise ValueError("provider audio")
-            if pending_gen != self.generation:
-                pending = b""
-            return pending + payload, self.generation
+            if audio is not None and offset < len(audio):
+                # The current answer is already using the backlog budget.
+                self.overflow_bytes += len(payload)
+                return audio, offset, audio_gen
+            if self.backlog_bytes() >= MAX_BACKLOG_BYTES:
+                self.overflow_bytes += len(payload)
+                return None, 0, self.generation
+            return memoryview(payload), 0, self.generation
         if event.kind == "interrupted":
             await self.interrupt()
-            return b"", self.generation
+            return None, 0, self.generation
         await on_control(event)
-        return pending, pending_gen
+        return audio, offset, audio_gen
 
     async def aclose(self) -> None:
         if self._closed:
             return
         self._closed = True
         self.generation += 1
-        self._drop_for_close()
+        self._discard_audio()
+        try:
+            self.queue.put_nowait(None)
+        except asyncio.QueueFull:
+            pass
         sender = self._sender
         self._sender = None
         if sender is None:
@@ -291,15 +347,3 @@ class DownlinkPacer:
             sender.cancel()
         with contextlib.suppress(asyncio.CancelledError, Exception):
             await sender
-
-    def _drop_for_close(self) -> None:
-        while True:
-            try:
-                self.queue.get_nowait()
-            except asyncio.QueueEmpty:
-                break
-        self._space.set()
-        try:
-            self.queue.put_nowait(None)
-        except asyncio.QueueFull:
-            pass

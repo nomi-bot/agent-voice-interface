@@ -450,11 +450,86 @@ class ProviderBridgeTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNotNone(pacer)
             self.assertLessEqual(pacer.max_ahead_us, 160_000)
             self.assertLessEqual(pacer.high_water, 8)
+            self.assertLessEqual(pacer.max_backlog_bytes, pacer_backlog_limit())
             self.assertGreater(clock.t, 2.0)
             self.assertLess(clock.t, 4.0)
         finally:
             await transport.inbox.put(None)
             await task
+
+    async def test_silent_gap_does_not_dump_the_next_answer(self):
+        fake = FakeProvider()
+        clock = VirtualClock()
+        transport = Gate()
+        session = self._session(transport, fake, clock=clock)
+        task = asyncio.create_task(session.run())
+        first = b"\x11\x00" * 320
+        second = bytes((index // 640) % 251 for index in range(96_000))
+        trace: list[tuple[float, bytes]] = []
+        try:
+            await self._ready(transport)
+            await fake.emit(VoiceEvent(kind="audio", payload=first))
+            frame = unpack_frame(await asyncio.wait_for(transport.next_item(), 1))
+            trace.append((clock.t, frame.payload))
+            clock.t += 10
+            await fake.emit(VoiceEvent(kind="audio", payload=second))
+            got = bytearray()
+            turn_times: list[float] = []
+            while len(got) < len(second):
+                nxt = unpack_frame(await asyncio.wait_for(transport.next_item(), 1))
+                got.extend(nxt.payload)
+                turn_times.append(clock.t)
+                trace.append((clock.t, nxt.payload))
+            self.assertEqual(bytes(got), second)
+            self.assertGreater(turn_times[-1] - turn_times[0], 2.0)
+            self.assertLess(turn_times[-1] - turn_times[0], 4.0)
+            pacer = session._pacer
+            self.assertIsNotNone(pacer)
+            self.assertLessEqual(pacer.max_ahead_us, 160_000)
+            self.assertLessEqual(pacer.max_backlog_bytes, pacer_backlog_limit())
+            _assert_speaker_plays(trace)
+        finally:
+            await transport.inbox.put(None)
+            await task
+
+    async def test_stalled_sender_bounds_backlog_and_reads_interrupt(self):
+        from avi.core.downlink import DownlinkPacer
+
+        blocked = asyncio.Event()
+        seen_control: list[str] = []
+
+        async def send_frame(chunk: bytes) -> None:
+            await blocked.wait()
+
+        async def send_json(message: dict) -> None:
+            seen_control.append(message["type"])
+
+        async def on_control(event: VoiceEvent) -> None:
+            seen_control.append(event.kind)
+
+        async def events():
+            for _ in range(100):
+                yield VoiceEvent(kind="audio", payload=bytes(8192))
+            yield VoiceEvent(kind="turn_complete", payload={})
+            yield VoiceEvent(kind="interrupted", payload={"source": "server"})
+
+        pacer = DownlinkPacer(send_frame, send_json)
+        task = asyncio.create_task(pacer.run(events(), on_control))
+        try:
+            for _ in range(1000):
+                if "response.interrupted" in seen_control and "turn_complete" in seen_control:
+                    break
+                await asyncio.sleep(0)
+            self.assertIn("turn_complete", seen_control)
+            self.assertIn("response.interrupted", seen_control)
+            self.assertLessEqual(pacer.max_backlog_bytes, pacer_backlog_limit())
+            self.assertLessEqual(pacer.backlog_bytes(), pacer_backlog_limit())
+            self.assertGreater(pacer.overflow_bytes, 8 * 8192)
+            self.assertLessEqual(pacer.high_water, 8)
+        finally:
+            blocked.set()
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
 
     async def test_input_only_negotiation_drops_downlink_frames(self):
         fake = FakeProvider()
@@ -604,6 +679,50 @@ class GatewayRouteTests(unittest.IsolatedAsyncioTestCase):
                         await send(incoming, _start())
                         ready = json.loads((await outgoing.get())["text"])
                         self.assertFalse(any(ready["capabilities"].values()))
+
+
+def pacer_backlog_limit() -> int:
+    from avi.core.downlink import MAX_BACKLOG_BYTES
+    return MAX_BACKLOG_BYTES
+
+
+def _assert_speaker_plays(trace: list[tuple[float, bytes]]) -> None:
+    """Play the paced frames on the browser SpeakerBuffer. Drops fail the test."""
+
+    import subprocess
+    payload = json.dumps([{"t": stamp, "hex": data.hex()} for stamp, data in trace])
+    script = r"""
+import {SpeakerBuffer} from "./clients/browser/voice.js";
+import {readFileSync} from "node:fs";
+const trace = JSON.parse(readFileSync(0, "utf8"));
+let now = 0;
+const buffer = new SpeakerBuffer({
+  now: () => now,
+  play() { return {ended: false, stop() {}}; },
+});
+let dropped = 0;
+for (const item of trace) {
+  now = item.t;
+  const payload = Buffer.from(item.hex, "hex");
+  if (!buffer.enqueue(payload)) dropped += 1;
+}
+if (dropped !== 0 || buffer.played !== trace.length) {
+  console.error(JSON.stringify({
+    dropped, played: buffer.played, frames: trace.length, depth: buffer.depthFrames(),
+  }));
+  process.exit(1);
+}
+"""
+    completed = subprocess.run(
+        ["node", "--input-type=module", "-e", script],
+        input=payload,
+        text=True,
+        capture_output=True,
+        cwd=ROOT,
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise AssertionError(completed.stderr or completed.stdout or "speaker dropped paced audio")
 
 
 def _free_port():

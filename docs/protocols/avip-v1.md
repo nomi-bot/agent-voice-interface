@@ -250,10 +250,12 @@ whenever audio input was negotiated, unless Live is configured. A complete
 Live configuration advertises the same two audio bits and does not mirror:
 uplink PCM is `send_audio`, and provider audio is packed as `audio_downlink`
 on the gateway clock (sequence and timestamp start at 0). Provider audio is
-split into nominal 20 ms frames. The gateway sends a frame only while less
-than 160 ms of audio is ahead of a monotonic clock, and it keeps at most
-eight unsent frames. `response.interrupted` drops the unsent frames of that
-generation. `turn_complete` and `tool_call` are not written as JSON. A tool
+split into nominal 20 ms frames. The gateway keeps a playout deadline less
+than 160 ms ahead of a monotonic clock and rebases that deadline to now
+after a silent gap, so the gap is not send credit. It holds at most eight
+queued frames plus one in-flight frame; further provider audio is dropped
+until there is room, and an interruption is still read. `response.interrupted`
+drops the unsent frames of that generation. `turn_complete` and `tool_call` are not written as JSON. A tool
 call is acknowledged in-process with an empty result and does not actuate
 anything. A provider error, including GoAway,
 closes the socket with `1011` and the reason `Voice provider unavailable`.
