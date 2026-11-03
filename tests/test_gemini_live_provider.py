@@ -2,10 +2,12 @@
 
 import asyncio
 from pathlib import Path
+import traceback
 import unittest
 
 from avi.main import resolve_browser_dir
 from avi.providers.gemini_live import (
+    CANCEL_SIGNAL,
     TOOL_NAME,
     GeminiLiveProvider,
     ProviderNotConfigured,
@@ -66,17 +68,26 @@ class FakeSession:
         self.turns = []
         self.closed = False
         self.block_send = None
+        self.fail_tool: BaseException | None = None
+        self.fail_content: BaseException | None = None
+        self.fail_audio: BaseException | None = None
         self._queue = asyncio.Queue()
 
     async def send_realtime_input(self, *, audio=None, **kwargs):
+        if self.fail_audio is not None:
+            raise self.fail_audio
         if self.block_send is not None:
             await self.block_send.wait()
         self.audio.append(audio)
 
     async def send_tool_response(self, *, function_responses):
+        if self.fail_tool is not None:
+            raise self.fail_tool
         self.tools.append(function_responses)
 
     async def send_client_content(self, *, turns=None, turn_complete=True):
+        if self.fail_content is not None:
+            raise self.fail_content
         self.turns.append((turns, turn_complete))
 
     def receive(self):
@@ -344,9 +355,136 @@ class ProviderContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreaterEqual(provider.flushed_audio_events, 1)
         events = await _events_until_quiet(provider)
         self.assertEqual(events[0].kind, "interrupted")
-        self.assertEqual(events[0].payload, {"source": "cancel"})
+        self.assertEqual(events[0].payload["source"], "cancel")
+        self.assertEqual(events[0].payload["signal"], CANCEL_SIGNAL)
         self.assertNotIn("hermes", repr(events))
         await provider.close()
+
+    async def test_cancel_drops_delayed_audio_until_the_next_turn(self):
+        session = FakeSession()
+        provider = _provider(session)
+        await provider.start()
+        iterator = provider.events()
+        stale = _pcm(2000, 480)
+        fresh = _pcm(7, 480)
+        await session.push(_audio_message(stale))
+        first = await anext(iterator)
+        self.assertEqual(first.kind, "audio")
+        await provider.cancel_response()
+        interrupted = await anext(iterator)
+        self.assertEqual(interrupted.kind, "interrupted")
+        await session.push(_audio_message(stale))
+        await session.push(_Message(server_content=_Content([], turn_complete=True)))
+        boundary = await anext(iterator)
+        self.assertEqual(boundary.kind, "turn_complete")
+        self.assertEqual(provider.suppressed_audio_chunks, 1)
+        await session.push(_audio_message(fresh, turn_complete=True))
+        nxt = await anext(iterator)
+        self.assertEqual(nxt.kind, "audio")
+        self.assertTrue(nxt.payload.startswith((7).to_bytes(2, "little", signed=True)))
+        self.assertFalse(nxt.payload.startswith((2000).to_bytes(2, "little", signed=True)))
+        done = await anext(iterator)
+        self.assertEqual(done.kind, "turn_complete")
+        await provider.close()
+
+    async def test_turn_boundary_does_not_keep_the_previous_tail(self):
+        session = FakeSession()
+        provider = _provider(session)
+        await provider.start()
+        iterator = provider.events()
+        marker = (9000).to_bytes(2, "little", signed=True)
+        await session.push(_audio_message(marker, turn_complete=True))
+        first = await anext(iterator)
+        self.assertEqual(first.kind, "turn_complete")
+        await session.push(_audio_message(_pcm(0, 2), turn_complete=True))
+        second = await anext(iterator)
+        self.assertEqual(second.kind, "audio")
+        self.assertFalse(second.payload.startswith(marker))
+        self.assertEqual(second.payload[:2], (0).to_bytes(2, "little", signed=True))
+        third = await anext(iterator)
+        self.assertEqual(third.kind, "turn_complete")
+        await provider.close()
+
+    async def test_session_errors_redact_the_key_before_shutdown(self):
+        secret = "super-secret-value"
+        session = FakeSession()
+        session.fail_tool = RuntimeError(f"tool rejected {secret}")
+        session.fail_content = RuntimeError(f"cancel rejected {secret}")
+        session.fail_audio = RuntimeError(f"audio rejected {secret}")
+
+        async def connect():
+            return session
+
+        provider = GeminiLiveProvider(
+            env={"GEMINI_API_KEY": secret, "GEMINI_LIVE_MODEL": "operator-selected-model"},
+            connector=connect,
+        )
+        await provider.start()
+        call = type("Call", (), {"id": "call-9", "name": TOOL_NAME, "args": {}})()
+        await session.push(
+            _Message(tool_call=type("Tool", (), {"function_calls": [call]})())
+        )
+        iterator = provider.events()
+        self.assertEqual((await anext(iterator)).kind, "tool_call")
+        with self.assertLogs("avi.providers.gemini_live", level="WARNING") as captured:
+            with self.assertRaises(ProviderSessionError) as caught:
+                await provider.tool_result("call-9", {"ok": True})
+        self._assert_secret_absent(secret, caught.exception, captured.output)
+        await provider.close()
+
+        session = FakeSession()
+        session.fail_content = RuntimeError(f"cancel rejected {secret}")
+
+        async def connect_cancel():
+            return session
+
+        provider = GeminiLiveProvider(
+            env={"GEMINI_API_KEY": secret, "GEMINI_LIVE_MODEL": "operator-selected-model"},
+            connector=connect_cancel,
+        )
+        await provider.start()
+        with self.assertLogs("avi.providers.gemini_live", level="WARNING") as captured:
+            with self.assertRaises(ProviderSessionError) as caught:
+                await provider.cancel_response()
+        self._assert_secret_absent(secret, caught.exception, captured.output)
+        await provider.close()
+
+        session = FakeSession()
+        session.fail_audio = RuntimeError(f"audio rejected {secret}")
+
+        async def connect_audio():
+            return session
+
+        provider = GeminiLiveProvider(
+            env={"GEMINI_API_KEY": secret, "GEMINI_LIVE_MODEL": "operator-selected-model"},
+            connector=connect_audio,
+        )
+        await provider.start()
+        iterator = provider.events()
+        with self.assertLogs("avi.providers.gemini_live", level="WARNING") as captured:
+            await provider.send_audio(_pcm(0, 4))
+            event = await anext(iterator)
+        self.assertEqual(event.kind, "error")
+        rendered = str(event.payload) + "\n" + "\n".join(captured.output)
+        self.assertNotIn(secret, rendered)
+        self.assertIn("[redacted]", rendered)
+        await provider.close()
+
+    def _assert_secret_absent(self, secret, error, logs):
+        rendered = "\n".join(
+            [
+                str(error),
+                repr(error),
+                "".join(traceback.format_exception(error)),
+                "" if error.__cause__ is None else str(error.__cause__),
+                "" if error.__context__ is None else str(error.__context__),
+                "\n".join(logs),
+            ]
+        )
+        self.assertNotIn(secret, rendered)
+        self.assertIn("[redacted]", str(error))
+        self.assertIsNone(error.__cause__)
+        self.assertIsNone(error.__context__)
 
     async def test_tool_round_trip_uses_explicit_scheduling(self):
         session = FakeSession()
@@ -539,6 +677,8 @@ class ProviderContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreater(duplex.uplink_bytes, 0)
         self.assertGreater(duplex.downlink_bytes, 0)
         self.assertIsNotNone(duplex.first_audio_ms)
+        self.assertTrue(duplex.cancel_accepted)
+        self.assertEqual(duplex.cancel_signal, CANCEL_SIGNAL)
         handshake = await run_tool_handshake(os.environ)
         self.assertEqual(handshake.status, "passed", handshake.reason)
         behaviors = {item.behavior: item for item in handshake.behaviors}
@@ -572,6 +712,135 @@ class BrowserAssetPackagingTests(unittest.TestCase):
                 "capture-worklet.js",
             ):
                 self.assertIn(f"avi/_browser/{asset}", names)
+
+    def test_installed_wheel_serves_voice_outside_the_source_tree(self):
+        import os
+        import socket
+        import subprocess
+        import sys
+        import tempfile
+        import time
+        import urllib.request
+
+        from hatchling.builders.wheel import WheelBuilder
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            builder = WheelBuilder(str(ROOT))
+            wheel = Path(next(builder.build(directory=str(root / "dist"), versions=["standard"])))
+            target = root / "pkg"
+            installed = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "pip",
+                    "install",
+                    "--no-deps",
+                    "--target",
+                    str(target),
+                    str(wheel),
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                cwd=root,
+            )
+            self.assertEqual(installed.returncode, 0, installed.stderr)
+            probe = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    "import avi.main; print(avi.main.__file__)",
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                cwd=root,
+                env={**os.environ, "PYTHONPATH": str(target)},
+            )
+            self.assertEqual(probe.returncode, 0, probe.stderr)
+            location = probe.stdout.strip()
+            self.assertIn(str(target), location)
+            self.assertNotIn(str(ROOT / "src"), location)
+            port = _free_port()
+            process = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-m",
+                    "uvicorn",
+                    "avi.main:app",
+                    "--host",
+                    "127.0.0.1",
+                    "--port",
+                    str(port),
+                ],
+                cwd=root,
+                env={**os.environ, "PYTHONPATH": str(target)},
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+            )
+            try:
+                _wait_http(port, process)
+                paths = (
+                    "/voice",
+                    "/voice/voice.js",
+                    "/voice/pcm.js",
+                    "/voice/avip-client.js",
+                    "/voice/telemetry.js",
+                    "/voice/capture-worklet.js",
+                )
+                bodies = {}
+                for path in paths:
+                    with urllib.request.urlopen(
+                        f"http://127.0.0.1:{port}{path}", timeout=5
+                    ) as response:
+                        self.assertEqual(response.status, 200, path)
+                        bodies[path] = response.read()
+                        self.assertTrue(bodies[path], path)
+                self.assertIn(b"./telemetry.js", bodies["/voice/voice.js"])
+                self.assertIn(b"VoiceTelemetry", bodies["/voice/telemetry.js"])
+                self.assertIn(b"/voice/voice.js", bodies["/voice"])
+            finally:
+                if process.poll() is None:
+                    process.terminate()
+                    try:
+                        process.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        process.wait(timeout=5)
+                if process.stdout is not None:
+                    process.stdout.close()
+
+
+def _free_port():
+    import socket
+
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+def _wait_http(port, process):
+    import time
+    import urllib.error
+    import urllib.request
+
+    deadline = time.monotonic() + 15
+    url = f"http://127.0.0.1:{port}/health"
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            output = process.stdout.read().decode() if process.stdout else ""
+            raise AssertionError(output or "gateway exited")
+        try:
+            with urllib.request.urlopen(url, timeout=1) as response:
+                if response.status == 200:
+                    return
+        except (urllib.error.URLError, TimeoutError):
+            time.sleep(0.05)
+    output = ""
+    if process.stdout:
+        process.terminate()
+    raise AssertionError(output or "gateway did not become healthy")
 
 
 if __name__ == "__main__":

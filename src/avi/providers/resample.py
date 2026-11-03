@@ -39,6 +39,16 @@ class StreamingResampler:
         self._pending.clear()
         self._pos = 0.0
 
+    def end_turn(self) -> None:
+        """Discard the unread tail at an utterance boundary.
+
+        A short final chunk can sit in ``_pending`` until a later push supplies
+        its neighbour. That neighbour must not be the next utterance. The tail
+        is dropped here instead of being emitted after ``turn_complete``.
+        """
+
+        self.reset()
+
     def push(self, pcm: bytes) -> bytes:
         if type(pcm) is not bytes or len(pcm) % 2 != 0:
             raise ValueError("PCM payload must be even-length bytes")

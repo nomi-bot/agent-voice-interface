@@ -20,7 +20,7 @@ actuation.
 | `send_audio(pcm)` | 16 kHz mono PCM s16le, the AVIP uplink profile. Declared as `audio/pcm;rate=16000`. The method still has no sample-rate argument. |
 | `events` | One consumer. `audio` payloads are 16 kHz PCM s16le. |
 | `tool_result(call_id, result)` | `send_tool_response` for a call the session has already emitted. |
-| `cancel_response` | `send_client_content(turns=None, turn_complete=True)`, which the Live API uses as an interrupt, plus a local flush of queued downlink audio. This does not cancel an agent run. |
+| `cancel_response` | `send_client_content(turns=None, turn_complete=True)` (`CANCEL_SIGNAL`). There is no Live method with this name. Queued audio is dropped. Later chunks from that generation are dropped until `turn_complete`. The next turn is emitted. This does not cancel an agent run. |
 | `close` | Cancels the uplink and downlink tasks and closes the socket. Idempotent. |
 
 `submit_text` exists on the class for the gated smoke. It is not part of
@@ -38,7 +38,7 @@ existing event kinds. Payloads are dicts except `audio`, which is bytes.
 | --- | --- |
 | Downlink PCM | `audio`. 24 kHz input is resampled to 16 kHz. A later chunk at a different rate is `error` / `sample_rate_changed` and the session closes. |
 | `server_content.interrupted` | `interrupted` with `{"source": "server"}`. Queued downlink audio is dropped. |
-| `cancel_response` | `interrupted` with `{"source": "cancel"}`. |
+| `cancel_response` | `interrupted` with `{"source": "cancel", "signal": CANCEL_SIGNAL}`. Audio until the next `turn_complete` is not emitted. |
 | `function_calls` | One `tool_call` per call: `id`, `name`, `args`. |
 | `tool_call_cancellation` | `error` / `tool_call_cancelled` and the ids. Those calls are forgotten. This is not agent-run cancellation. |
 | `turn_complete` | `turn_complete`. The payload includes `reason`, `generation_complete`, `interaction_status`, and `transcript_present`. The transcript text is not copied out of the SDK message. |
@@ -58,8 +58,9 @@ resuming. Automatic renewal is deferred.
 Live input is 16 kHz. Live output is 24 kHz. AVIP playback is 16 kHz.
 `StreamingResampler` keeps the fractional read cursor across chunks. Three
 seconds of 24 kHz PCM pushed in 20 ms pieces matches one push and yields
-exactly three seconds at 16 kHz. `reset` drops the tail so the next turn does
-not blend with audio that was interrupted.
+exactly three seconds at 16 kHz. At `turn_complete`, and on interrupt or
+cancel, `end_turn` drops the unread tail before the completion event. A
+one-sample remainder therefore cannot prefix the next utterance.
 
 The browser helper `resampleS16leToAvip` is still a one-shot conversion.
 `S16leResampler` in `clients/browser/pcm.js` is the streaming equivalent for a
@@ -112,8 +113,12 @@ does not store arguments, audio, the key, or a resumption handle.
 
 `run_duplex_roundtrip` sends 100 ms of 16 kHz silence, then one text turn that
 asks for a spoken word, and records downlink byte count and milliseconds from
-the text send to the first 16 kHz audio event. The text turn is there because
-this repository has no speech fixture. Silence is not a conversational prompt.
+the text send to the first 16 kHz audio event. After that first audio event it
+sends `CANCEL_SIGNAL` and waits for `turn_complete`. `cancel_accepted` records
+whether that call returned. The text turn is there because this repository has
+no speech fixture. Silence is not a conversational prompt. The cancel call is
+how a credentialed run checks the interrupt against the live API. This
+workspace has no key, so that run is left for a machine that does.
 
 Neither function runs unless `GEMINI_API_KEY` is set. A key without
 `GEMINI_LIVE_MODEL` fails closed. `GOOGLE_API_KEY` does not authorize a call.
@@ -135,7 +140,7 @@ for `NON_BLOCKING`.
 - Unknown tool id, a non-dict result, and an oversized result are rejected and not sent.
 - Server `interrupted` does not emit the audio that arrived on that message.
 - A resumption handle on a `GoAway` message is not retained in the provider or the event.
-- Error text is passed through `redact` so the API key is replaced with `[redacted]`.
+- Error text is passed through `redact` before shutdown clears the in-memory key. The warning log and `ProviderSessionError` use that text. The raised error is not chained to the original exception, so `__cause__` and `__context__` do not keep the key.
 
 ## Browser assets
 

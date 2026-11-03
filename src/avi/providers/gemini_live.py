@@ -18,6 +18,7 @@ from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import dataclass
 import json
+import logging
 import os
 from typing import Any
 
@@ -35,8 +36,14 @@ from avi.providers.gemini_live_spike import (
 from avi.providers.resample import StreamingResampler
 
 
+logger = logging.getLogger(__name__)
+
 AVIP_SAMPLE_RATE_HZ = INPUT_SAMPLE_RATE_HZ
 TOOL_NAME = "avi_ack"
+# There is no Live RPC named cancel_response. This client content message
+# is the interrupt the adapter sends. A credentialed smoke can confirm the
+# selected model accepts it; this module does not embed a model id.
+CANCEL_SIGNAL = "send_client_content(turns=None, turn_complete=True)"
 _TOOL_BEHAVIORS = frozenset({"BLOCKING", "NON_BLOCKING"})
 _MAX_UPLINK_CHUNKS = 8
 _MAX_UPLINK_CHUNK_BYTES = 32_000
@@ -66,6 +73,8 @@ class DuplexReport:
     downlink_bytes: int = 0
     first_audio_ms: int | None = None
     saw_turn_complete: bool = False
+    cancel_signal: str | None = None
+    cancel_accepted: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -263,9 +272,10 @@ class GeminiLiveProvider:
 
     ``send_audio`` accepts 16 kHz mono PCM s16le, the AVIP uplink profile.
     ``events`` yields that same profile: 24 kHz provider output is resampled
-    with one ``StreamingResampler`` for the life of the session. ``cancel_response``
-    sends ``turn_complete`` with no client turn, which the Live API uses as an
-    interrupt, and drops queued downlink audio. It does not cancel an agent run.
+    with one ``StreamingResampler`` for the life of the session.     ``cancel_response`` sends ``CANCEL_SIGNAL``. Queued audio is dropped, and
+    later chunks from that generation are dropped until ``turn_complete``.
+    The resampler tail is discarded at that boundary, before the event. The
+    next turn is emitted. This does not cancel an agent run.
 
     Not safe to share across threads. One ``events`` consumer.
     """
@@ -305,6 +315,8 @@ class GeminiLiveProvider:
         self._resampler = StreamingResampler(output_rate_hz, AVIP_SAMPLE_RATE_HZ)
         self._source_rate = output_rate_hz
         self._seen_audio = False
+        self._suppress_audio = False
+        self.suppressed_audio_chunks = 0
         self._pending_tools: dict[str, str] = {}
         self._generation_complete = False
         self._interaction_status: str | None = None
@@ -381,26 +393,40 @@ class GeminiLiveProvider:
         response: dict[str, Any] = {"id": call_id, "name": name, "response": body}
         if self.tool_behavior == "NON_BLOCKING":
             response["scheduling"] = "WHEN_IDLE"
+        failure: str | None = None
         try:
             await self._session.send_tool_response(function_responses=response)  # type: ignore[attr-defined]
         except Exception as exc:
             self._pending_tools[call_id] = name
-            await self._fail(exc)
-            raise ProviderSessionError(self._safe(exc)) from None
+            failure = await self._fail(exc)
+        if failure is not None:
+            raise ProviderSessionError(failure)
 
     async def cancel_response(self) -> None:
+        """Interrupt the current generation.
+
+        The Live API has no ``cancel_response`` method. The signal is
+        ``CANCEL_SIGNAL``: client content with no turn and ``turn_complete``
+        true. Audio already queued is discarded. Chunks that arrive afterward
+        belong to the cancelled generation until ``turn_complete``, and they
+        are not emitted. The following turn is.
+        """
+
         if self._state != "open" or self._session is None:
             raise RuntimeError("provider is not open")
-        self._resampler.reset()
-        self._events.clear_audio()
-        self.flushed_audio_events = self._events.flushed_audio
+        self._hold_generation()
+        failure: str | None = None
         try:
             await self._session.send_client_content(turns=None, turn_complete=True)  # type: ignore[attr-defined]
         except Exception as exc:
-            await self._fail(exc)
-            raise ProviderSessionError(self._safe(exc)) from None
+            failure = await self._fail(exc)
+        if failure is not None:
+            raise ProviderSessionError(failure)
         self._events.push_control(
-            VoiceEvent(kind="interrupted", payload={"source": "cancel"})
+            VoiceEvent(
+                kind="interrupted",
+                payload={"source": "cancel", "signal": CANCEL_SIGNAL},
+            )
         )
 
     async def close(self) -> None:
@@ -529,9 +555,7 @@ class GeminiLiveProvider:
                 if self._emit_pcm(pcm, rate):
                     return True
         else:
-            self._resampler.reset()
-            self._events.clear_audio()
-            self.flushed_audio_events = self._events.flushed_audio
+            self._hold_generation()
             self._events.push_control(
                 VoiceEvent(kind="interrupted", payload={"source": "server"})
             )
@@ -548,6 +572,7 @@ class GeminiLiveProvider:
             if getattr(content, "turn_complete", False):
                 transcript = getattr(content, "output_transcription", None)
                 text = getattr(transcript, "text", None) if transcript is not None else None
+                self._release_generation()
                 self._events.push_control(
                     VoiceEvent(
                         kind="turn_complete",
@@ -566,9 +591,26 @@ class GeminiLiveProvider:
         self.flushed_audio_events = self._events.flushed_audio
         return self._events.overflowed
 
+    def _hold_generation(self) -> None:
+        """Stop emitting the generation that just ended or was cancelled."""
+
+        self._suppress_audio = True
+        self._resampler.end_turn()
+        self._events.clear_audio()
+        self.flushed_audio_events = self._events.flushed_audio
+
+    def _release_generation(self) -> None:
+        """Drop any fractional tail, then accept audio from the next turn."""
+
+        self._resampler.end_turn()
+        self._suppress_audio = False
+
     def _emit_pcm(self, pcm: bytes, rate: int | None) -> bool:
         """Resample one downlink chunk. Return True when the session must stop."""
 
+        if self._suppress_audio:
+            self.suppressed_audio_chunks += 1
+            return False
         source = self.output_rate_hz if rate is None else rate
         if self._seen_audio and source != self._source_rate:
             self._events.push_control(
@@ -619,16 +661,21 @@ class GeminiLiveProvider:
         if getattr(update, "resumable", False):
             self.resumption_updates += 1
 
-    async def _fail(self, exc: BaseException) -> None:
+    async def _fail(self, exc: BaseException) -> str:
+        """Redact ``exc`` before shutdown clears the key. Return that text."""
+
+        message = self._safe(exc)
+        logger.warning("live provider session failed: %s", message)
         if self._shutdown_started:
-            return
+            return message
         self._events.push_control(
             VoiceEvent(
                 kind="error",
-                payload={"code": "provider_error", "detail": self._safe(exc)},
+                payload={"code": "provider_error", "detail": message},
             )
         )
         await self._shutdown(reader=asyncio.current_task() is self._reader)
+        return message
 
     async def _shutdown(self, *, reader: bool = False) -> None:
         if self._shutdown_started:
@@ -775,8 +822,11 @@ async def run_duplex_roundtrip(
 
     Skips when ``GEMINI_API_KEY`` is unset. The spoken turn is text because
     this process has no microphone fixture. Uplink PCM is silence on the same
-    session, sent before that turn. The report stores byte counts and latency,
-    not audio, the key, or a resumption handle.
+    session, sent before that turn.     The report stores byte counts and latency,
+    not audio, the key, or a resumption handle. After the first audio event it
+    sends ``CANCEL_SIGNAL`` so a credentialed run can see that the interrupt
+    was accepted. Later audio from that generation is suppressed until
+    ``turn_complete``.
     """
 
     try:
@@ -791,6 +841,7 @@ async def run_duplex_roundtrip(
     saw_turn = False
     reason = "live duplex completed"
     status = "passed"
+    cancel_accepted = False
     loop = asyncio.get_running_loop()
     try:
         async with asyncio.timeout(timeout_s):
@@ -807,6 +858,11 @@ async def run_duplex_roundtrip(
                     if first_ms is None:
                         first_ms = int((loop.time() - started) * 1000)
                     downlink += len(event.payload)
+                    if not cancel_accepted:
+                        await provider.cancel_response()
+                        cancel_accepted = True
+                elif event.kind == "interrupted":
+                    continue
                 elif event.kind == "turn_complete":
                     saw_turn = True
                     break
@@ -823,7 +879,10 @@ async def run_duplex_roundtrip(
         reason = redact(f"{type(exc).__name__}: {exc}", provider._secret)
     finally:
         await provider.close()
-    if status == "passed" and (not saw_turn or downlink <= 0):
+    if status == "passed" and not cancel_accepted:
+        status = "failed"
+        reason = "cancel signal was not sent"
+    elif status == "passed" and (not saw_turn or downlink <= 0):
         status = "failed"
         reason = "duplex turn ended without downlink audio"
     return DuplexReport(
@@ -834,6 +893,8 @@ async def run_duplex_roundtrip(
         downlink_bytes=downlink,
         first_audio_ms=first_ms,
         saw_turn_complete=saw_turn,
+        cancel_signal=CANCEL_SIGNAL,
+        cancel_accepted=cancel_accepted,
     )
 
 
