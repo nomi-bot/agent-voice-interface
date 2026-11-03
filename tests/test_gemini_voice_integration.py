@@ -9,9 +9,8 @@ CI sets neither variable, so the session test skips. Skip and failure text
 name the variables and never include their values. This module does not read
 a key into a report and does not open a provider socket.
 
-The provider itself is still the JEV-23 placeholder. When that class can be
-constructed, the session test checks the voice-provider surface and a
-provider-path telemetry report. It still does not call ``start``.
+``GeminiLiveProvider`` can be constructed. The session test checks that
+surface and a provider-path telemetry report. It does not call ``start``.
 """
 
 import json
@@ -85,10 +84,7 @@ class GeminiVoiceIntegrationTests(unittest.TestCase):
             self.assertNotIn(alias, str(caught.exception))
 
             os.environ[_MODEL_NAME] = pin
-            not_implemented = gemini_integration_gate()
-            self.assertIn("not implemented", not_implemented)
-            self.assertNotIn(secret, not_implemented)
-            self.assertNotIn(pin, not_implemented)
+            self.assertIsNone(gemini_integration_gate())
         finally:
             for name, value in saved.items():
                 if value is None:

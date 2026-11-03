@@ -16,8 +16,16 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["httpx>=0.27,<1"]
+dev = ["httpx>=0.27,<1", "hatchling>=1.26"]
 gemini-live = ["google-genai==2.34.0"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/avi", "src/avip_client"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"clients/browser/voice.html" = "avi/_browser/voice.html"
+"clients/browser/avip-client.js" = "avi/_browser/avip-client.js"
+"clients/browser/pcm.js" = "avi/_browser/pcm.js"
+"clients/browser/voice.js" = "avi/_browser/voice.js"
+"clients/browser/telemetry.js" = "avi/_browser/telemetry.js"
+"clients/browser/capture-worklet.js" = "avi/_browser/capture-worklet.js"

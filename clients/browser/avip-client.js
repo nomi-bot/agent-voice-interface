@@ -252,6 +252,19 @@ export class AvipBrowserClient {
     return frame;
   }
 
+  // Advance the media clock for captured audio that was not sent. Sequence
+  // stays put, and no silence frame is written. The next sendUplink timestamp
+  // includes the gap, so a contiguous sequence is not continuous speech.
+  noteCaptureGap(durationUs) {
+    if (this.state === "closed") throw this.failure;
+    if (!this.started || this.state !== "open") fail("invalid_message");
+    const gap = timestampBigInt(durationUs);
+    if (gap === 0n) return;
+    const next = this.timestampUs + gap;
+    if (next > UINT64_MAX) fail("invalid_frame", "timestamp_us");
+    this.timestampUs = next;
+  }
+
   async nextFrame() {
     const data = await this._next();
     if (typeof data === "string") {

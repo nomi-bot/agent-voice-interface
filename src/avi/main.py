@@ -23,9 +23,18 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="AVI development gateway", lifespan=lifespan)
 ALLOWED_ORIGINS = {"http://localhost:8000", "http://127.0.0.1:8000"}
 SESSION_LIMITS = SessionLimits()
-# Development demo only. The directory is the source tree next to this package,
-# not a general file server. Names below are the only files the route reads.
-_BROWSER_DIR = Path(__file__).resolve().parents[2] / "clients" / "browser"
+# Development demo only. Not a general file server. Names below are the only
+# files the route reads. A wheel install carries them in ``avi/_browser``.
+# A source checkout uses ``clients/browser`` when that package directory is
+# absent. The packaged directory wins when both are complete.
+_VOICE_FILES = (
+    "voice.html",
+    "avip-client.js",
+    "pcm.js",
+    "voice.js",
+    "telemetry.js",
+    "capture-worklet.js",
+)
 _VOICE_ASSETS = {
     "avip-client.js": "text/javascript",
     "pcm.js": "text/javascript",
@@ -36,9 +45,29 @@ _VOICE_ASSETS = {
 _VOICE_HEADERS = {"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"}
 
 
+def _directory_has_voice_files(directory: Path) -> bool:
+    return all((directory / name).is_file() for name in _VOICE_FILES)
+
+
+def resolve_browser_dir(packaged: Path, source: Path) -> Path:
+    """Pick the voice-asset directory. Packaged files win when complete."""
+    if _directory_has_voice_files(packaged):
+        return packaged
+    if _directory_has_voice_files(source):
+        return source
+    raise FileNotFoundError("browser voice assets are not installed")
+
+
+def _browser_dir() -> Path:
+    packaged = Path(__file__).resolve().parent / "_browser"
+    source = Path(__file__).resolve().parents[2] / "clients" / "browser"
+    return resolve_browser_dir(packaged, source)
+
+
 def _browser_file(name: str) -> Path:
-    path = (_BROWSER_DIR / name).resolve()
-    if path.parent != _BROWSER_DIR.resolve() or not path.is_file():
+    root = _browser_dir()
+    path = (root / name).resolve()
+    if path.parent != root.resolve() or not path.is_file():
         raise HTTPException(status_code=404)
     return path
 

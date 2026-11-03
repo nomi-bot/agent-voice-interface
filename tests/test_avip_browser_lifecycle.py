@@ -76,6 +76,25 @@ class ClockTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(client._clock.timestamp_us, 20_000)
         self.assertEqual(socket.sent, [pack_frame(AUDIO_UPLINK, 0, 0, b"\x00\x00")])
 
+    async def test_python_capture_gap_advances_time_without_a_sequence(self):
+        client = _client()
+        socket = _ScriptedSocket(client)
+        client._ws = socket
+        client._started = True
+        client.note_capture_gap(40_000)
+        self.assertEqual(client._clock.sequence, 0)
+        self.assertEqual(client._clock.timestamp_us, 40_000)
+        await client.send_uplink(b"\x00\x00")
+        self.assertEqual(
+            socket.sent, [pack_frame(AUDIO_UPLINK, 0, 40_000, b"\x00\x00")]
+        )
+        self.assertEqual(client._clock.sequence, 1)
+        self.assertEqual(client._clock.timestamp_us, 60_000)
+        client.note_capture_gap(0)
+        self.assertEqual(client._clock.timestamp_us, 60_000)
+        with self.assertRaises(AvipError):
+            client.note_capture_gap(-1)
+
     async def test_python_closed_socket_does_not_retry_the_sequence(self):
         client = _client()
         client._ws = _ClosingSocket()

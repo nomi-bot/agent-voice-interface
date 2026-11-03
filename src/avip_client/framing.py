@@ -70,6 +70,23 @@ class UplinkClock:
         self.sequence = (self.sequence + 1) % 2**32
         self.timestamp_us += NOMINAL_CHUNK_US
 
+    def note_capture_gap(self, duration_us: int) -> None:
+        """Advance the media clock for audio that was captured and not sent.
+
+        Sequence does not move, and no silence frame is inserted. The next
+        ``encode`` uses the later timestamp. A contiguous sequence is therefore
+        not continuous speech: the gap is the difference between this timestamp
+        and the previous frame's timestamp plus that frame's duration.
+        """
+        if type(duration_us) is not int or duration_us < 0:
+            raise AvipError("invalid_frame", "timestamp_us")
+        if duration_us == 0:
+            return
+        updated = self.timestamp_us + duration_us
+        if updated > _UINT64_MAX:
+            raise AvipError("invalid_frame", "timestamp_us")
+        self.timestamp_us = updated
+
 
 def pack_frame(
     direction: int,

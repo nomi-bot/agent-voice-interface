@@ -1,9 +1,10 @@
 """Credential-safe Gemini Live compatibility smoke.
 
-This module is not a ``VoiceProvider``. ``GeminiLiveProvider`` still raises
-``NotImplementedError``. A live session is opened only when ``GEMINI_API_KEY``
-and ``GEMINI_LIVE_MODEL`` are both set. There is no default model id. The
-decision record is ``docs/adr/011-gemini-live-compatibility.md``.
+This module is not a ``VoiceProvider``. The adapter is
+``avi.providers.gemini_live.GeminiLiveProvider``. A live session is opened
+only when ``GEMINI_API_KEY`` and ``GEMINI_LIVE_MODEL`` are both set. There is
+no default model id. The decision record is
+``docs/adr/011-gemini-live-compatibility.md``.
 """
 
 from __future__ import annotations

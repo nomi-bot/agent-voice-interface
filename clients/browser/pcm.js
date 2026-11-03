@@ -140,3 +140,23 @@ export function resampleS16leToAvip(payload, sourceRateHz) {
   if (sourceRateHz === SAMPLE_RATE_HZ) return new Uint8Array(bytes);
   return floatToS16le(resampleFloat(s16leToFloat(bytes), sourceRateHz, SAMPLE_RATE_HZ));
 }
+
+// Persistent converter for a sequence of PCM chunks. A fresh
+// resampleS16leToAvip call starts a new cursor; this object keeps it.
+export class S16leResampler {
+  constructor(fromRate, toRate) {
+    if (!Number.isFinite(fromRate) || !Number.isFinite(toRate) || fromRate <= 0 || toRate <= 0) {
+      throw new Error("invalid_sample_rate");
+    }
+    this.fromRate = fromRate;
+    this.toRate = toRate;
+    this._converter = fromRate === toRate ? null : new RateConverter(fromRate, toRate);
+  }
+
+  push(payload) {
+    const bytes = payload instanceof Uint8Array ? payload : new Uint8Array(payload);
+    if (bytes.length % 2 !== 0) throw new Error("invalid_frame: payload");
+    if (!this._converter) return new Uint8Array(bytes);
+    return floatToS16le(this._converter.push(s16leToFloat(bytes)));
+  }
+}

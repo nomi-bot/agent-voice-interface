@@ -73,9 +73,12 @@ class GeminiLiveSpikeTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             validate_pcm_s16le(b"")
 
-    def test_provider_remains_unimplemented(self):
-        with self.assertRaises(NotImplementedError):
-            GeminiLiveProvider()
+    def test_provider_constructs_without_opening_a_session(self):
+        provider = GeminiLiveProvider(env={})
+        self.assertTrue(provider.capabilities.full_duplex)
+        self.assertTrue(provider.capabilities.tool_calls)
+        self.assertTrue(provider.capabilities.response_cancellation)
+        self.assertNotIn("GEMINI_API_KEY", repr(provider))
 
     def test_python_sources_do_not_embed_model_ids(self):
         root = Path(__file__).resolve().parents[1]
