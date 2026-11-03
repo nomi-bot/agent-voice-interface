@@ -55,14 +55,14 @@
 <body>
   <main>
     <h1>AVI browser voice</h1>
-    <p>Microphone capture and speaker playback for the local AVIP gateway. This page uses the existing 16 kHz <code>pcm_s16le</code> frames. It plays that mock profile only. Gemini Live’s 24 kHz output is a provider rate and is not played as 16 kHz. This page is not a voice model, and it does not run an agent.</p>
+    <p>Microphone capture and speaker playback for the local AVIP gateway. This page uses the existing 16 kHz <code>pcm_s16le</code> frames. When the gateway is running Gemini Live, it resamples provider audio to that profile before framing it. This page does not call Gemini, does not see the API key, and does not run an agent.</p>
 
     <div id="origin" class="panel"></div>
 
     <div class="panel">
-      <p><strong>Permission.</strong> Start asks this page for the microphone. Samples leave the browser only as AVIP audio frames sent to this page’s own gateway. The mock sink discards uplink PCM. The mirror sends those same bytes back, and this page plays them. Nothing is written to disk.</p>
+      <p><strong>Permission.</strong> Start asks this page for the microphone. Samples leave the browser only as AVIP audio frames sent to this page’s own gateway. On the mock path the mirror sends those same bytes back. On the Live path the gateway sends provider audio instead. Nothing is written to disk.</p>
       <p><strong>Secure context.</strong> Browsers expose the microphone only on HTTPS, or on <code>http://localhost</code> and <code>http://127.0.0.1</code>. Opening the file directly (<code>file://</code>) or from another host will not prompt. This development gateway also accepts only <code>http://127.0.0.1:8000</code> and <code>http://localhost:8000</code>.</p>
-      <p><strong>Headphones.</strong> The mock path plays your microphone back through the speakers. Headphones keep that echo from feeding into the mic.</p>
+      <p><strong>Headphones.</strong> The mock path plays your microphone back through the speakers, and Live playback can feed the mic. Headphones keep that loop from building.</p>
     </div>
 
     <p>
@@ -103,7 +103,7 @@
       <li>Allow the microphone, then press Stop playback. Uplink frames keep increasing, the speaker goes quiet, and the session stays open. That button does not send a cancel.</li>
       <li>Unplug the headset or stop the browser’s microphone. The page reports that the track ended, capture stops, and the session stays open until you end it or the socket closes.</li>
       <li>Stop the gateway. The page reports the disconnect and releases the microphone.</li>
-      <li>Start the gateway without <code>AVIP_MOCK_MEDIA=1</code>. The page reports that audio was not negotiated and releases the microphone.</li>
+      <li>Start the gateway with neither Live credentials nor <code>AVIP_MOCK_MEDIA=1</code>. The page reports that audio was not negotiated and releases the microphone.</li>
     </ul>
   </main>
   <script type="module">

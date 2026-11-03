@@ -14,6 +14,7 @@ import {
   UPLINK_FRAME_BYTES,
   developmentGatewayOrigin,
   pageOrigin,
+  applyPlaybackInterruption,
   playbackSchedule,
   secureContext,
   uplinkQueueDecision,
@@ -506,6 +507,68 @@ await check("playback-buffer-drops-past-eight-frames", async () => {
   buffer.stop();
   assert.equal(stopped, 8);
   assert.equal(sent.length, 8);
+});
+
+await check("interrupt-flushes-only-the-current-generation", async () => {
+  const stopped = [];
+  let now = 0;
+  const buffer = new SpeakerBuffer({
+    now: () => now,
+    play(payload) {
+      const handle = {ended: false, payload, stop() { stopped.push(payload); handle.ended = true; }};
+      return handle;
+    },
+  });
+  const first = new Uint8Array(640).fill(1);
+  const second = new Uint8Array(640).fill(2);
+  assert.equal(buffer.enqueue(first), true);
+  assert.equal(buffer.handles.length, 1);
+  const flushed = applyPlaybackInterruption(buffer, 0, {
+    protocol: "avip/1",
+    type: "response.interrupted",
+    generation: 0,
+  });
+  assert.equal(flushed.flushed, true);
+  assert.equal(flushed.generation, 1);
+  assert.equal(stopped.length, 1);
+  assert.equal(buffer.handles.length, 0);
+  assert.equal(buffer.enqueue(second), true);
+  assert.equal(buffer.played, 2);
+  assert.equal(buffer.dropped, 0);
+  const stale = applyPlaybackInterruption(buffer, flushed.generation, {
+    protocol: "avip/1",
+    type: "response.interrupted",
+    generation: 0,
+  });
+  assert.equal(stale.flushed, false);
+  assert.equal(stale.generation, 1);
+  assert.equal(buffer.handles.length, 1);
+  assert.equal(buffer.handles[0].payload[0], 2);
+});
+
+await check("paced-20ms-frames-keep-a-multisecond-burst", async () => {
+  let now = 0;
+  const buffer = new SpeakerBuffer({
+    now: () => now,
+    play() {
+      return {ended: false, stop() {}};
+    },
+  });
+  const frame = new Uint8Array(640);
+  const slot = 320 / 16000;
+  const limit = 8 * slot;
+  const frames = 3 * 50;
+  for (let i = 0; i < frames; i += 1) {
+    let next = buffer.nextTime < now ? now : buffer.nextTime;
+    while (next - now >= limit) {
+      now += slot;
+      next = buffer.nextTime < now ? now : buffer.nextTime;
+    }
+    assert.equal(buffer.enqueue(frame), true, `frame ${i}`);
+  }
+  assert.equal(buffer.played, frames);
+  assert.equal(buffer.dropped, 0);
+  assert.ok(buffer.depthFrames() < 8.01);
 });
 
 await check("track-ended-stops-capture-and-leaves-the-session-open", async () => {

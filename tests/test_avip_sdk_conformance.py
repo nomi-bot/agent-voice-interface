@@ -12,6 +12,7 @@ same integer the Python encoder writes.
 import ast
 import asyncio
 import json
+import os
 from pathlib import Path
 import socket
 import subprocess
@@ -75,6 +76,20 @@ def _case(direction, sequence, timestamp_us, payload: bytes):
 
 
 class SdkConformanceTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        super().setUp()
+        self._voice_env = patch.dict(
+            os.environ,
+            {
+                "GEMINI_API_KEY": "",
+                "GEMINI_LIVE_MODEL": "",
+                "AVIP_MOCK_MEDIA": "",
+            },
+            clear=False,
+        )
+        self._voice_env.start()
+        self.addCleanup(self._voice_env.stop)
+
     def test_sdk_does_not_import_the_gateway_serializer(self):
         for path in sorted(SDK_ROOT.glob("*.py")):
             tree = ast.parse(path.read_text())
@@ -281,6 +296,8 @@ def _mock_media_env():
     import os
     env = os.environ.copy()
     env["AVIP_MOCK_MEDIA"] = "1"
+    for name in ("GEMINI_API_KEY", "GEMINI_LIVE_MODEL", "GOOGLE_API_KEY"):
+        env.pop(name, None)
     return env
 
 

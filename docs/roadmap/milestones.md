@@ -17,8 +17,8 @@ the depth cap. `queue_full` is an error envelope and leaves the socket open
 when that sink is not taking; other media `ProtocolError`s close it.
 Disconnect cancels the sink and drops the connection-scoped session and its
 queue. The development gateway advertises no
-capabilities unless `AVIP_MOCK_MEDIA=1`, which enables the same PCM mirror for
-every client. Legacy `/ws` is unchanged. Browser-shaped and headless Python mock
+capabilities unless Live credentials are set or `AVIP_MOCK_MEDIA=1`, which
+enables the same PCM mirror when Live is not configured. Legacy `/ws` is unchanged. Browser-shaped and headless Python mock
 clients pass shared conformance tests on that route. The headless SDK is the
 `avip_client` package, and the browser adapter is `clients/browser/avip-client.js`.
 Each has its own encoder. Node executes the browser encoder and the bytes match
@@ -32,7 +32,7 @@ are not on that socket. M0 is not complete.
 Verify official Gemini SDK/model and audio/session/tool contracts and pin a tested SDK range; implement Gemini Live provider, browser mic/speaker and binary audio transport, format/resampling/buffering, session/errors and measurement instrumentation.
 **Exit:** browser can converse via AVI; record empirical latency, recovery and format evidence.
 
-**Implementation progress:** The browser client captures a microphone, packs the existing 16 kHz PCM uplink, and plays downlink PCM. `GET /voice` is the mock-mirror demo (`AVIP_MOCK_MEDIA=1`). Uplink send watches the WebSocket byte queue and drops or closes when that queue stops draining. A dropped uplink frame leaves the sequence in place and advances the sender media clock by the skipped duration. Local playback stop does not send a control message. Playback accepts the 16 kHz AVIP profile only. `GeminiLiveProvider` resamples 24 kHz Live output to that profile with a streaming converter. It is not mounted on `/ws/avip`. Timing names (`capture-start`, `session-start`, `first-uplink`, `first-downlink`, `playback-start`) are recorded on a page session clock and copied into a local JSON report with drop counters, a mock-mirror latency distribution, and null cost fields. An in-process soak exercises capture, transmit, and speaker drops without a provider. There is no measured end-to-end Gemini latency claim.
+**Implementation progress:** The browser client captures a microphone, packs the existing 16 kHz PCM uplink, and plays downlink PCM. `GET /voice` is the mock-mirror demo (`AVIP_MOCK_MEDIA=1`). Uplink send watches the WebSocket byte queue and drops or closes when that queue stops draining. A dropped uplink frame leaves the sequence in place and advances the sender media clock by the skipped duration. Local playback stop does not send a control message. Playback accepts the 16 kHz AVIP profile only. `GeminiLiveProvider` resamples 24 kHz Live output to that profile with a streaming converter and is mounted on `/ws/avip` when `GEMINI_API_KEY` and `GEMINI_LIVE_MODEL` are both set. `GET /health` distinguishes `live`, `mock`, and `not_configured`. GoAway closes the socket and does not renew the session. Timing names (`capture-start`, `session-start`, `first-uplink`, `first-downlink`, `playback-start`) are recorded on a page session clock and copied into a local JSON report with drop counters, a mock-mirror latency distribution, and null cost fields. An in-process soak exercises capture, transmit, and speaker drops without a provider. There is no measured end-to-end Gemini latency claim.
 
 **A0 spike:** [ADR-011](../adr/011-gemini-live-compatibility.md) records the
 2026-11-01 source check, the `google-genai==2.34.0` pin, and a credential-safe

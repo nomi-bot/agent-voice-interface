@@ -16,11 +16,12 @@ The current implementation supplies a Python 3.12+ FastAPI gateway, four adapter
 an asynchronous mock agent, a JSON WebSocket control protocol, tests and CI.
 The original Apache-2.0 LICENSE is preserved.
 
-**The gateway still has no live voice session and no Hermes integration.**
+**The gateway mounts Gemini Live on `/ws/avip` when credentials are set. There is still no Hermes integration.**
 `GeminiLiveProvider` implements the `VoiceProvider` port
-([provider record](docs/providers/gemini-live.md)). `/ws/avip` does not construct
-it. A browser page can capture a microphone and play the mock PCM mirror. No
-full-duplex, latency, or macOS runtime claim has been validated against Gemini.
+([provider record](docs/providers/gemini-live.md)). A browser page can capture
+a microphone and play 16 kHz downlink: the mock PCM mirror, or Live audio
+after the gateway resamples it. No full-duplex latency or macOS runtime claim
+has been validated against Gemini in this tree.
 The default install has no Google SDK. The optional `gemini-live` extra pins
 `google-genai==2.34.0` for the adapter and the compatibility smoke in
 [ADR-011](docs/adr/011-gemini-live-compatibility.md). Both read `GEMINI_API_KEY`
@@ -30,8 +31,9 @@ M0 is in progress. The gateway validates the AVIP v1 session handshake and serve
 it on `/ws/avip`, together with binary media frames once audio input is
 negotiated. A ready session lasts only as long as that socket; when the socket
 closes, the session id and its media queue are gone. The development gateway
-advertises no audio, camera, display, or robot capability unless
-`AVIP_MOCK_MEDIA=1`, which enables the same PCM mirror for every client. `/ws`
+advertises no audio, camera, display, or robot capability unless Live
+credentials are set or `AVIP_MOCK_MEDIA=1`. Live is real duplex. The mock flag
+is the PCM mirror, and only when Live is not configured. `/ws`
 still uses the legacy control protocol below. The headless SDK (`avip_client`)
 and the browser adapter (`clients/browser/avip-client.js`) both speak `/ws/avip`.
 `clients/browser/voice.js` captures microphone audio into that same uplink frame
@@ -68,9 +70,10 @@ python -m unittest discover -s tests -v
 `GeminiLiveProvider` speaks the existing port: 16 kHz uplink, 24 kHz downlink
 resampled to 16 kHz with a streaming converter, bounded queues, and
 `close` on connect failure, `GoAway`, and cancel. It declares one tool,
-`avi_ack`, with explicit `BLOCKING` or `NON_BLOCKING` behavior. The gateway
-does not open this session. `GET /health` still reports `voice: not_implemented`.
-Details, negative cases, and the deferred list are in
+`avi_ack`, with explicit `BLOCKING` or `NON_BLOCKING` behavior. `/ws/avip`
+opens that session when `GEMINI_API_KEY` and `GEMINI_LIVE_MODEL` are both set.
+`GET /health` reports `voice` as `live`, `mock`, or `not_configured`.
+Details, the microphone soak, and the deferred list are in
 [the provider record](docs/providers/gemini-live.md).
 
 The compatibility smoke is unchanged. It opens one short Live session only when
@@ -192,15 +195,18 @@ async def main():
 asyncio.run(main())
 ```
 
-Leave `AVIP_MOCK_MEDIA` unset for the unit suite. Set it to `1` before this
-snippet, or `session.ready` reports every capability false and the binary frame
-closes the socket.
+Leave `AVIP_MOCK_MEDIA` and the Live variables unset for the unit suite. Set
+`AVIP_MOCK_MEDIA=1` before this snippet when Live is not configured, or
+`session.ready` reports every capability false and the binary frame closes
+the socket. With both Live variables set, the same snippet talks to Gemini
+instead of echoing.
 
 To hear the microphone come back through the speakers, start the gateway with
 the mock mirror enabled and open the voice page on that same origin. Use
 headphones. The page asks for microphone permission, sends 20 ms PCM uplink
-frames, and plays the mirrored 16 kHz downlink. Gemini Live’s 24 kHz output is
-not this profile and is not played as 16 kHz. **Stop playback** flushes only the
+frames, and plays 16 kHz downlink. On the mock path those bytes are the
+microphone again. On the Live path they are the provider after 24 kHz to
+16 kHz resampling in the gateway. **Stop playback** flushes only the
 local speaker. It does not send a control message and it does not close the
 session. If the WebSocket send queue reaches 8 unsent nominal frames, later
 microphone frames are dropped and counted. A dropped frame does not advance
@@ -216,8 +222,8 @@ AVIP_MOCK_MEDIA=1 python3.12 -m uvicorn avi.main:app --host 127.0.0.1 --port 800
 Open `http://127.0.0.1:8000/voice` (or `http://localhost:8000/voice` if that is
 the host you bound). `file://` and any other origin cannot use this page: the
 microphone needs a secure context, and the gateway only accepts those two
-origins. Leave `AVIP_MOCK_MEDIA` unset and the page reports that audio was not
-negotiated.
+origins. Leave Live unconfigured and `AVIP_MOCK_MEDIA` unset and the page
+reports that audio was not negotiated.
 
 The one-frame console paste is still
 [tests/fixtures/browser-avip-client.js](tests/fixtures/browser-avip-client.js).
@@ -242,10 +248,13 @@ probe, and the credential rule are in
 negative paths (permission denied, unplug, gateway stop) are listed on the
 voice page.
 
-That variable is exact: only `1` enables audio input and audio output. It does
-not enable a voice provider or robot actions. The mirror copies PCM into a
+That variable is exact: only `1` enables the mirror, and only when Live is
+not configured. It does not enable robot actions. The mirror copies PCM into a
 downlink frame. A mock sink on the same session takes accepted uplink frames
 and discards them, so a continuous sender is not stuck after eight frames.
+Live, when configured, forwards those frames to the provider instead of
+mirroring them. The provider drops its own overflow; the socket does not
+turn that into `queue_full`.
 `queue_full` still means the bounded queue rejected the newest frame. That
 happens when the sink is not taking frames as fast as they arrive. The socket
 stays open, and the refused frame keeps its sequence.

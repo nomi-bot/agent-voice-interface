@@ -345,6 +345,8 @@ class LiveMockProbeTests(unittest.IsolatedAsyncioTestCase):
         log = tempfile.TemporaryFile(mode="w+")
         env = os.environ.copy()
         env["AVIP_MOCK_MEDIA"] = "1"
+        for name in ("GEMINI_API_KEY", "GEMINI_LIVE_MODEL", "GOOGLE_API_KEY"):
+            env.pop(name, None)
         process = subprocess.Popen(
             [
                 sys.executable, "-m", "uvicorn", "avi.main:app",
