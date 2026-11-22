@@ -1,6 +1,7 @@
 """Both mock clients speak AVIP on one /ws/avip gateway."""
 import asyncio
 import json
+import os
 from pathlib import Path
 import re
 import time
@@ -61,6 +62,20 @@ def mirror(sequence: int, timestamp_us: int, payload: bytes) -> bytes:
 
 
 class ConformanceTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        super().setUp()
+        self._voice_env = patch.dict(
+            os.environ,
+            {
+                "GEMINI_API_KEY": "",
+                "GEMINI_LIVE_MODEL": "",
+                "AVIP_MOCK_MEDIA": "",
+            },
+            clear=False,
+        )
+        self._voice_env.start()
+        self.addCleanup(self._voice_env.stop)
+
     def test_browser_bytes_match_the_shared_framing_module(self):
         browser = BrowserShapedClient()
         headless = HeadlessPythonClient()

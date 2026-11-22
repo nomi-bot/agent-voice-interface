@@ -18,6 +18,7 @@ from avip_client.framing import (
     unpack_frame,
 )
 from avip_client.messages import encode_session_start, session_start
+from avip_client.playback import PlaybackBuffer
 from avip_client.session import AvipClient
 
 __all__ = [
@@ -28,6 +29,7 @@ __all__ = [
     "AudioFrame",
     "AvipClient",
     "AvipError",
+    "PlaybackBuffer",
     "UplinkClock",
     "encode_session_start",
     "pack_frame",
