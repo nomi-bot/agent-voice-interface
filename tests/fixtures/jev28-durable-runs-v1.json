@@ -1,0 +1,34 @@
+{
+  "contract": "avip/1 durable_runs",
+  "positive": {
+    "start": {"protocol":"avip/1","type":"session.start","request_id":"handshake-1","session_id":null,"device_id":"device-1","capabilities":{"audio_input":true,"audio_output":true,"durable_runs":true}},
+    "ready": {"protocol":"avip/1","type":"session.ready","request_id":"handshake-1","session_id":"session-1","capabilities":{"audio_input":true,"audio_output":true,"camera":false,"display":false,"robot_actions":false,"durable_runs":true}},
+    "authenticate": {"protocol":"avip/1","type":"agent.run.authenticate","token":"0000000000000000000000000000000000000000000"},
+    "authenticated": {"protocol":"avip/1","type":"agent.run.authenticated"},
+    "submit": {"protocol":"avip/1","type":"agent.run.submit","request_id":"request-1","kind":"read_only","arguments":{"query":"synthetic query"}},
+    "status": {"protocol":"avip/1","type":"agent.run.status","run_id":"run-1","state":"running","dispatch":"accepted","cursor":4,"expires_at":700,"expired":false,"failure_code":null,"reconciliation_pending":false},
+    "attach": {"protocol":"avip/1","type":"agent.run.attach","run_id":"run-1","after_cursor":4},
+    "events": [
+      {"protocol":"avip/1","type":"agent.run.event","run_id":"run-1","cursor":5,"kind":"progress","payload":{"text":"still running"}},
+      {"protocol":"avip/1","type":"agent.run.event","run_id":"run-1","cursor":6,"kind":"completed","payload":{"result":"synthetic answer"}}
+    ],
+    "receipt": {"protocol":"avip/1","type":"agent.run.replay","run_id":"run-1","resume_cursor":6}
+  },
+  "access_denied": {
+    "request": {"protocol":"avip/1","type":"agent.run.result","run_id":"run-1"},
+    "reply": {"protocol":"avip/1","type":"error","code":"access_denied","field":null}
+  },
+  "unsupported": {
+    "request": {"protocol":"avip/1","type":"agent.run.status","run_id":"run-1"},
+    "reply": {"protocol":"avip/1","type":"error","code":"unsupported_message_type","field":"type"}
+  },
+  "malformed": {
+    "text": "[]",
+    "reply": {"protocol":"avip/1","type":"error","code":"invalid_message","field":null},
+    "close": {"code":1002,"reason":"Protocol error"}
+  },
+  "legacy": {
+    "start": {"protocol":"avip/1","type":"session.start","request_id":"legacy-1","session_id":null,"device_id":"device-1","capabilities":{}},
+    "capabilities": {"audio_input":false,"audio_output":false,"camera":false,"display":false,"robot_actions":false}
+  }
+}
