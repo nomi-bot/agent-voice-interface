@@ -188,7 +188,7 @@ def _api_error(status: int, data: dict) -> HermesError:
         return HermesError(HermesErrorCode.APPROVAL_DENIED)
     if status == 404:
         return HermesError(HermesErrorCode.NO_RUN_EVIDENCE)
-    if status == 400:
+    if status == 400 or (status == 409 and code == "idempotency_key_conflict"):
         return HermesError(HermesErrorCode.REQUEST_REJECTED)
     if status == 409 and code == "unknown_execution":
         return HermesError(HermesErrorCode.REMOTE_OUTCOME_UNKNOWN)

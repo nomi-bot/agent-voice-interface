@@ -143,6 +143,20 @@ class HermesHttpTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("private", str(raised.exception))
             self.assertEqual(len(calls), 1)
 
+    async def test_exact_idempotency_conflict_is_a_rejection(self):
+        for remote_code, expected in (
+            ("idempotency_key_conflict", HermesErrorCode.REQUEST_REJECTED),
+            ("unknown_conflict", HermesErrorCode.SUBMIT_UNCERTAIN),
+        ):
+            with self.subTest(code=remote_code):
+                adapter = self.adapter_for(lambda _: httpx.Response(
+                    409, json={"error": {"code": remote_code, "message": "private"}},
+                ))
+                with self.assertRaises(HermesError) as raised:
+                    await adapter.submit(TASK, CONTEXT, correlation_id=CORRELATION)
+                self.assertEqual(raised.exception.code, expected)
+                self.assertEqual(raised.exception.correlation_id, CORRELATION)
+
     async def test_recovery_never_uses_submit_and_preserves_unknown(self):
         requests = []
 
