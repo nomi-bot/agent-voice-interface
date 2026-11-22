@@ -15,9 +15,9 @@ message is one media frame, passed through ``unpack_frame``. Accepted uplink
 frames are queued. A mock sink takes them when this session has no voice
 provider. When a ``VoiceProvider`` is attached and audio was negotiated, the
 same frames are forwarded to that provider and its 16 kHz audio events come
-back as downlink frames. Provider control events stay in this process. They
-are not written as new AVIP message types. The same driver handles every
-device label.
+back as downlink frames. A provider interruption emits
+``response.interrupted`` to clear client playback. The same driver handles
+every device label.
 """
 import asyncio
 import json

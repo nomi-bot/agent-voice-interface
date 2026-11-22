@@ -3,7 +3,7 @@ Status: **Draft — `/ws/avip` serves the session handshake and, once audio
 input is negotiated, binary media frames. When `GEMINI_API_KEY` and
 `GEMINI_LIVE_MODEL` are both set, accepted uplink PCM is sent to
 `GeminiLiveProvider` and downlink frames are that provider's 16 kHz audio.
-Provider control events are not new AVIP messages. When Live is not
+Provider interruption emits `response.interrupted`. When Live is not
 configured, `AVIP_MOCK_MEDIA=1` still enables the M0 PCM mirror and a mock
 sink drains accepted uplink frames. Otherwise the gateway advertises no
 capabilities. `GET /health` reports `voice` as `live`, `mock`, or
@@ -250,15 +250,15 @@ whenever audio input was negotiated, unless Live is configured. A complete
 Live configuration advertises the same two audio bits and does not mirror:
 uplink PCM is `send_audio`, and provider audio is packed as `audio_downlink`
 on the gateway clock (sequence and timestamp start at 0). Provider audio is
-split into nominal 20 ms frames. The gateway keeps a playout deadline less
-than 160 ms ahead of a monotonic clock and rebases that deadline to now
-after a silent gap, so the gap is not send credit. It holds at most eight
-queued frames plus one in-flight frame; further provider audio is dropped
-until there is room, and an interruption is still read. `response.interrupted`
-drops the unsent frames of that generation. `turn_complete` and `tool_call` are not written as JSON. A tool
-call is acknowledged in-process with an empty result and does not actuate
-anything. A provider error, including GoAway,
-closes the socket with `1011` and the reason `Voice provider unavailable`.
+split into nominal 20 ms frames. The gateway schedules up to 160 ms of
+playback ahead of a monotonic clock. After a silent gap, playback resumes
+from the current time. The gateway buffers up to 96,000 bytes (three seconds
+of PCM), including any in-flight frame. At capacity it drops excess audio
+and continues reading control events. A provider interruption clears unsent
+audio and emits `response.interrupted`. The gateway handles `turn_complete`
+and `tool_call` internally and acknowledges tool calls with an empty result.
+A provider error, including GoAway, closes the socket with `1011` and the
+reason `Voice provider unavailable`.
 That close is not session renewal. The default development gateway, with
 Live unset and `AVIP_MOCK_MEDIA` unset, advertises neither audio bit, so
 binary frames still close with 1003.

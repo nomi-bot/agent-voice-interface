@@ -7,8 +7,10 @@ frames are the provider's 16 kHz audio. `turn_complete` and `tool_call` stay ins
 answered with an empty `tool_result` and does not run a device action.
 `interrupted` becomes one versioned AVIP message,
 `response.interrupted`, naming the playback generation to flush. Audio after
-that message is the next generation. Downlink is paced in 20 ms frames and
-kept under a 160 ms horizon so the browser speaker does not drop a burst.
+that message is the next generation. The gateway buffers up to three seconds
+of PCM across provider events and sends nominal 20 ms frames up to 160 ms
+ahead of playback. It drops excess audio at capacity and keeps reading
+provider control events.
 An idle `cancel_response` does not arm a hold: suppression starts only after
 this generation has emitted audio, and a second cancel does not wait for a
 second `turn_complete`.
@@ -84,7 +86,7 @@ one-sample remainder therefore cannot prefix the next utterance.
 The browser helper `resampleS16leToAvip` is still a one-shot conversion.
 `S16leResampler` in `clients/browser/pcm.js` is the streaming equivalent for a
 client that receives 24 kHz chunks. The voice page still refuses to play 24 kHz
-bytes as 16 kHz. The provider is what emits 16 kHz for a future gateway path.
+bytes as 16 kHz. The provider emits 16 kHz PCM for the gateway.
 The mock mirror does not call either resampler.
 
 Uplink inside the provider is capped at 8 chunks. A full queue drops the newest
@@ -264,11 +266,7 @@ smoke and does not require downlink. The interrupt check cancels the active
 generation and requires the next spoken turn.
 
 ```sh
-python -m unittest \
-  tests.test_avip_live_mount.LiveGatewayTests.test_configured_gateway_returns_speech \
-  tests.test_avip_live_mount.LiveGatewayTests.test_live_interrupt_keeps_the_next_response \
-  tests.test_avip_live_mount.LiveGatewayTests.test_silence_uplink_stays_open \
-  -v
+PYTHONPATH=tests python -m unittest -v test_avip_live_mount.LiveGatewayTests
 ```
 
 The browser interruption check does not need a microphone or a key. It is

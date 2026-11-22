@@ -8,7 +8,7 @@ import asyncio
 import copy
 import json
 import os
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from pathlib import Path
 import socket
 import subprocess
@@ -143,11 +143,14 @@ class VirtualClock:
 
     def __init__(self):
         self.t = 0.0
+        self.advancing = asyncio.Event()
+        self.advancing.set()
 
     def monotonic(self) -> float:
         return self.t
 
     async def sleep(self, seconds: float) -> None:
+        await self.advancing.wait()
         self.t += seconds
 
 
@@ -188,6 +191,17 @@ class Gate:
         item = self.sent[self._seen]
         self._seen += 1
         return item
+
+
+class TimedGate(Gate):
+    def __init__(self, clock: VirtualClock):
+        super().__init__()
+        self.clock = clock
+        self.trace: list[tuple[float, bytes]] = []
+
+    async def send_bytes(self, payload):
+        self.trace.append((self.clock.monotonic(), unpack_frame(payload).payload))
+        await super().send_bytes(payload)
 
 
 def _start(index=0):
@@ -431,28 +445,40 @@ class ProviderBridgeTests(unittest.IsolatedAsyncioTestCase):
     async def test_multisecond_burst_is_intact_and_stays_inside_160ms(self):
         fake = FakeProvider()
         clock = VirtualClock()
-        transport = Gate()
+        transport = TimedGate(clock)
         session = self._session(transport, fake, clock=clock)
         task = asyncio.create_task(session.run())
         payload = bytes((index // 640) % 251 for index in range(96_000))
         try:
             await self._ready(transport)
-            await fake.emit(VoiceEvent(kind="audio", payload=payload))
+            # The model can emit many events before playback advances, even
+            # when the WebSocket can send immediately.
+            clock.advancing.clear()
+            for offset in range(0, len(payload), 8_000):
+                await fake.emit(VoiceEvent(kind="audio", payload=payload[offset:offset + 8_000]))
+            await fake.emit(VoiceEvent(kind="tool_call", payload={"id": "after-audio"}))
+            await asyncio.wait_for(fake.wait_until(lambda: bool(fake.tool_results)), 1)
+            clock.advancing.set()
+
             got = bytearray()
-            while len(got) < len(payload):
-                frame = unpack_frame(await asyncio.wait_for(transport.next_item(), 1))
-                self.assertLessEqual(len(frame.payload), 640)
-                self.assertGreater(len(frame.payload), 0)
-                self.assertEqual(len(frame.payload) % 2, 0)
-                got.extend(frame.payload)
+            with suppress(TimeoutError):
+                async with asyncio.timeout(1):
+                    while len(got) < len(payload):
+                        frame = unpack_frame(await transport.next_item())
+                        self.assertLessEqual(len(frame.payload), 640)
+                        self.assertGreater(len(frame.payload), 0)
+                        self.assertEqual(len(frame.payload) % 2, 0)
+                        got.extend(frame.payload)
+            self.assertEqual(len(got), len(payload))
             self.assertEqual(bytes(got), payload)
             pacer = session._pacer
             self.assertIsNotNone(pacer)
             self.assertLessEqual(pacer.max_ahead_us, 160_000)
-            self.assertLessEqual(pacer.high_water, 8)
             self.assertLessEqual(pacer.max_backlog_bytes, pacer_backlog_limit())
             self.assertGreater(clock.t, 2.0)
             self.assertLess(clock.t, 4.0)
+            self.assertEqual(pacer.overflow_bytes, 0)
+            _assert_speaker_plays(transport.trace)
         finally:
             await transport.inbox.put(None)
             await task
@@ -460,34 +486,31 @@ class ProviderBridgeTests(unittest.IsolatedAsyncioTestCase):
     async def test_silent_gap_does_not_dump_the_next_answer(self):
         fake = FakeProvider()
         clock = VirtualClock()
-        transport = Gate()
+        transport = TimedGate(clock)
         session = self._session(transport, fake, clock=clock)
         task = asyncio.create_task(session.run())
         first = b"\x11\x00" * 320
         second = bytes((index // 640) % 251 for index in range(96_000))
-        trace: list[tuple[float, bytes]] = []
         try:
             await self._ready(transport)
             await fake.emit(VoiceEvent(kind="audio", payload=first))
             frame = unpack_frame(await asyncio.wait_for(transport.next_item(), 1))
-            trace.append((clock.t, frame.payload))
+            self.assertEqual(frame.payload, first)
             clock.t += 10
             await fake.emit(VoiceEvent(kind="audio", payload=second))
             got = bytearray()
-            turn_times: list[float] = []
             while len(got) < len(second):
                 nxt = unpack_frame(await asyncio.wait_for(transport.next_item(), 1))
                 got.extend(nxt.payload)
-                turn_times.append(clock.t)
-                trace.append((clock.t, nxt.payload))
             self.assertEqual(bytes(got), second)
+            turn_times = [stamp for stamp, _ in transport.trace[1:]]
             self.assertGreater(turn_times[-1] - turn_times[0], 2.0)
             self.assertLess(turn_times[-1] - turn_times[0], 4.0)
             pacer = session._pacer
             self.assertIsNotNone(pacer)
             self.assertLessEqual(pacer.max_ahead_us, 160_000)
             self.assertLessEqual(pacer.max_backlog_bytes, pacer_backlog_limit())
-            _assert_speaker_plays(trace)
+            _assert_speaker_plays(transport.trace)
         finally:
             await transport.inbox.put(None)
             await task
@@ -496,36 +519,38 @@ class ProviderBridgeTests(unittest.IsolatedAsyncioTestCase):
         from avi.core.downlink import DownlinkPacer
 
         blocked = asyncio.Event()
+        sending = asyncio.Event()
+        interrupt_sent = asyncio.Event()
         seen_control: list[str] = []
 
         async def send_frame(chunk: bytes) -> None:
+            sending.set()
             await blocked.wait()
 
         async def send_json(message: dict) -> None:
             seen_control.append(message["type"])
+            interrupt_sent.set()
 
         async def on_control(event: VoiceEvent) -> None:
             seen_control.append(event.kind)
 
         async def events():
-            for _ in range(100):
+            yield VoiceEvent(kind="audio", payload=bytes(8192))
+            await sending.wait()
+            for _ in range(99):
                 yield VoiceEvent(kind="audio", payload=bytes(8192))
             yield VoiceEvent(kind="turn_complete", payload={})
             yield VoiceEvent(kind="interrupted", payload={"source": "server"})
+            await blocked.wait()
 
         pacer = DownlinkPacer(send_frame, send_json)
         task = asyncio.create_task(pacer.run(events(), on_control))
         try:
-            for _ in range(1000):
-                if "response.interrupted" in seen_control and "turn_complete" in seen_control:
-                    break
-                await asyncio.sleep(0)
-            self.assertIn("turn_complete", seen_control)
-            self.assertIn("response.interrupted", seen_control)
-            self.assertLessEqual(pacer.max_backlog_bytes, pacer_backlog_limit())
-            self.assertLessEqual(pacer.backlog_bytes(), pacer_backlog_limit())
-            self.assertGreater(pacer.overflow_bytes, 8 * 8192)
-            self.assertLessEqual(pacer.high_water, 8)
+            await asyncio.wait_for(interrupt_sent.wait(), 1)
+            self.assertEqual(seen_control, ["turn_complete", "response.interrupted"])
+            self.assertEqual(pacer.max_backlog_bytes, pacer_backlog_limit())
+            self.assertEqual(pacer.backlog_bytes(), 640)
+            self.assertEqual(pacer.overflow_bytes, 100 * 8192 - pacer_backlog_limit())
         finally:
             blocked.set()
             task.cancel()
