@@ -2,6 +2,8 @@
 **Canonical implementation plan** for AVI v0.1; supersedes [the legacy roadmap](../roadmap.md).
 Agreed planning baseline, 2026-10-30. Engineering estimates are provisional, not dates. **Linear project:** [P-JEV-1](https://linear.app/jevenzzh/project/agent-voice-interface-d0df264bb651).
 
+The [parallel delivery plan and feature specifications](delivery/README.md) map the remaining gates to branches, shared contracts and acceptance evidence.
+
 ## M0: Foundation & AVIP Protocol (4–5 engineer-days)
 Deliver client/voice/agent ports, shared AVIP v1 proposal, transport abstraction, capability negotiation, session/run state machines and mocked conformance tests.
 **Exit:** browser-shaped and headless Python mock clients connect to same gateway without special-case core logic.
