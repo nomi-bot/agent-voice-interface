@@ -300,5 +300,5 @@ class GeminiDelegationToolTests(unittest.TestCase):
         ])
         for declaration, field in zip(enabled[1:], ("query", "run_id"), strict=True):
             self.assertEqual(declaration.parameters.required, [field])
-            self.assertFalse(declaration.parameters.additional_properties)
+            self.assertIsNone(declaration.parameters.additional_properties)
             self.assertEqual(set(declaration.parameters.properties), {field})

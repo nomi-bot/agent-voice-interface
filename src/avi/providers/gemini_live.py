@@ -264,6 +264,8 @@ def live_connect_config(tool_behavior: str, *, enable_delegation_tools: bool = F
     if enable_delegation_tools:
         from avi.core.voice_delegation import DELEGATE_TOOL, RESULT_TOOL
 
+        # The Live Developer API rejects additionalProperties. The router validates exact keys.
+
         declarations.extend([
             types.FunctionDeclaration(
                 name=DELEGATE_TOOL,
@@ -272,7 +274,6 @@ def live_connect_config(tool_behavior: str, *, enable_delegation_tools: bool = F
                     type=types.Type.OBJECT,
                     properties={"query": types.Schema(type=types.Type.STRING, min_length=1, max_length=4096)},
                     required=["query"],
-                    additional_properties=False,
                 ),
                 behavior=behavior,
             ),
@@ -283,7 +284,6 @@ def live_connect_config(tool_behavior: str, *, enable_delegation_tools: bool = F
                     type=types.Type.OBJECT,
                     properties={"run_id": types.Schema(type=types.Type.STRING, min_length=1, max_length=128)},
                     required=["run_id"],
-                    additional_properties=False,
                 ),
                 behavior=behavior,
             ),
