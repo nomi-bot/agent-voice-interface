@@ -1,0 +1,158 @@
+{
+  "upstream_commit": "0f602c5f6f18615632535251d62a2db74ce93b69",
+  "python": "3.14.10",
+  "platform": "Darwin arm64",
+  "mode": "Hermes gateway API Server with a canonical local owner and loopback model fixture",
+  "idempotency_capability": {
+    "supported": true,
+    "durable": true,
+    "retention_seconds": 86400
+  },
+  "read_only": {
+    "toolsets": {
+      "http_status": 200,
+      "enabled": [],
+      "model_tools": 0
+    },
+    "request": {
+      "method": "POST",
+      "path": "/v1/runs",
+      "idempotency_key": "avi-success",
+      "body": {
+        "input": "Return the fixed marker AVI_JEV26_OK."
+      }
+    },
+    "submit": {
+      "http_status": 202,
+      "body": {
+        "run_id": "run_redacted_success",
+        "status": "started",
+        "replayed": false
+      },
+      "idempotency_replayed": null
+    },
+    "missing_auth_http_status": 401,
+    "malformed": {
+      "http_status": 400,
+      "type": "invalid_request_error",
+      "code": null
+    },
+    "duplicate": {
+      "http_status": 202,
+      "body": {
+        "run_id": "run_redacted_success",
+        "status": "queued",
+        "replayed": true
+      },
+      "idempotency_replayed": "true"
+    },
+    "conflict": {
+      "http_status": 409,
+      "code": "idempotency_key_conflict"
+    },
+    "status": {
+      "object": "hermes.run",
+      "run_id": "run_redacted_success",
+      "status": "completed",
+      "output": "AVI_JEV26_OK"
+    },
+    "event": {
+      "event": "run.completed",
+      "seq": 1,
+      "run_id": "run_redacted_success",
+      "output": "AVI_JEV26_OK"
+    },
+    "model_requests": 1
+  },
+  "approval_denial": {
+    "pending_control": {
+      "kind": "approval",
+      "prompt_id": "prompt_redacted",
+      "execution_generation": 1
+    },
+    "approval_event": {
+      "event": "approval.request",
+      "seq": 1
+    },
+    "approval_request": {
+      "request_id": "prompt_redacted",
+      "execution_generation": 1,
+      "choice": "deny"
+    },
+    "missing_auth_http_status": 401,
+    "wrong_auth_http_status": 401,
+    "stale_approval_http_status": 409,
+    "decision_receipt": {
+      "http_status": 200,
+      "status": "resolved"
+    },
+    "reconnected_event_sequence": [
+      {
+        "event": "approval.settled",
+        "seq": 2
+      },
+      {
+        "event": "tool.completed",
+        "seq": 3
+      },
+      {
+        "event": "message.delta",
+        "seq": 4
+      },
+      {
+        "event": "run.completed",
+        "seq": 5
+      }
+    ],
+    "tool_denied": true,
+    "status": {
+      "object": "hermes.run",
+      "run_id": "run_redacted_denial",
+      "status": "completed",
+      "output": "AVI_JEV26_DENIAL_OBSERVED"
+    }
+  },
+  "stop": {
+    "stop": {
+      "http_status": 200,
+      "status": "stopping"
+    },
+    "status": {
+      "object": "hermes.run",
+      "run_id": "run_redacted_stop",
+      "status": "cancelled",
+      "output": "Operation interrupted: waiting for model response (0.0s elapsed)."
+    }
+  },
+  "restart": {
+    "lost_receipt_replay": {
+      "http_status": 202,
+      "body": {
+        "run_id": "run_redacted_unknown",
+        "status": "unknown",
+        "replayed": true
+      },
+      "idempotency_replayed": "true"
+    },
+    "after_crash": {
+      "object": "hermes.run",
+      "run_id": "run_redacted_unknown",
+      "status": "unknown",
+      "output": ""
+    },
+    "crashed_turn_model_requests": 1,
+    "completed_receipt_replay": {
+      "http_status": 202,
+      "body": {
+        "run_id": "run_redacted_success",
+        "status": "completed",
+        "replayed": true
+      },
+      "idempotency_replayed": "true"
+    },
+    "completed_model_requests": 1,
+    "events_after_restart_http_status": 404,
+    "old_key_http_status": 401,
+    "new_key_old_run_http_status": 404
+  }
+}
