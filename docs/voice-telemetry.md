@@ -114,23 +114,24 @@ and leaves the previous cost fields unchanged. `report()` also redacts
 strings that look like secrets.
 
 The development gateway constructs telemetry with `path="mock-mirror"` and
-`scenario="gateway"`. Those are constructor arguments (`telemetry_path`,
-`telemetry_scenario`), not a permanent label for every future session.
-JEV-23 must pass `telemetry_path="provider"` when a real provider is
-attached. Leaving the default would report model latency as mock-mirror.
+`scenario="gateway"` on the mirror. A mounted Live session uses
+`path="provider"` and `scenario="gemini-live"`, so that interval is not
+labeled as mock-mirror loopback. Those are constructor arguments
+(`telemetry_path`, `telemetry_scenario`). The Live report still leaves
+`cost` null and does not store PCM or a resumption handle.
 
 ## Gemini
 
-Real Gemini sessions are not part of this slice. `GeminiLiveProvider` still
-raises `NotImplementedError`. The gated test uses the same operator contract
-as [ADR-011](adr/011-gemini-live-compatibility.md): `GEMINI_API_KEY` is the
+`/ws/avip` opens `GeminiLiveProvider` when both Live variables are set.
+The gated tests use the same operator contract as
+[ADR-011](adr/011-gemini-live-compatibility.md): `GEMINI_API_KEY` is the
 only credential, and `GEMINI_LIVE_MODEL` is the only model pin. `GOOGLE_API_KEY`
 is ignored. There is no `AVI_GEMINI_MODEL` alias.
 
-`tests/test_gemini_voice_integration.py` is discovered by the unit suite.
-Unset `GEMINI_API_KEY` skips, including when only `GOOGLE_API_KEY` is present.
-A key without `GEMINI_LIVE_MODEL` fails closed instead of choosing a model.
-Both set, while the provider is still unimplemented, skips without placing a
-call. Skip and failure text name the variables and do not include their
-values. CI sets neither variable. The test does not print the environment and
-does not put a key in a report.
+`tests/test_gemini_voice_integration.py` and
+`tests/test_avip_live_mount.py` are discovered by the unit suite.
+Unset `GEMINI_API_KEY` skips the network cases, including when only
+`GOOGLE_API_KEY` is present. A key without `GEMINI_LIVE_MODEL` fails closed
+instead of choosing a model. Skip and failure text name the variables and do
+not include their values. CI sets neither variable. The tests do not print
+the environment and do not put a key in a report.

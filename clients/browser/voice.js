@@ -75,6 +75,20 @@ export function uplinkQueueDecision(bufferedAmount, frameBytes = UPLINK_FRAME_BY
   return "send";
 }
 
+// Flush scheduled audio for one AVIP generation. A later generation is left
+// playing. Local stopPlayback is separate: it also sets playbackHalted.
+export function applyPlaybackInterruption(speaker, generation, message) {
+  if (!message || message.protocol !== "avip/1" || message.type !== "response.interrupted") {
+    return {generation, flushed: false};
+  }
+  if (!Number.isInteger(message.generation) || message.generation < 0) {
+    return {generation, flushed: false};
+  }
+  if (message.generation !== generation) return {generation, flushed: false};
+  if (speaker) speaker.stop();
+  return {generation: generation + 1, flushed: true};
+}
+
 // AVIP version 1 downlink is 16 kHz. Passing any other rate throws instead of
 // scheduling those bytes on a 16 kHz buffer. Gemini Live output is 24 kHz and
 // has to go through resampleS16leToAvip before it is an AVIP payload.
@@ -368,6 +382,7 @@ export class BrowserVoice {
     this.running = false;
     this.captureLive = false;
     this.playbackHalted = false;
+    this.playbackGeneration = 0;
     this._closing = false;
     this._shutdownDone = false;
     this._reader = null;
@@ -521,7 +536,7 @@ export class BrowserVoice {
       if (!capabilities || !capabilities.audio_input || !capabilities.audio_output) {
         throw voiceError(
           "audio_unavailable",
-          "The gateway did not negotiate audio. Start it with AVIP_MOCK_MEDIA=1.",
+          "The gateway did not negotiate audio. Set GEMINI_API_KEY and GEMINI_LIVE_MODEL, or start it with AVIP_MOCK_MEDIA=1.",
         );
       }
       if (capabilities.robot_actions) {
@@ -687,6 +702,16 @@ export class BrowserVoice {
       }
       if (!this.running) return;
       try {
+        if (message && message.type === "response.interrupted") {
+          const applied = applyPlaybackInterruption(
+            this.speaker, this.playbackGeneration, message,
+          );
+          this.playbackGeneration = applied.generation;
+          if (applied.flushed) {
+            this.onStatus("playback-interrupted", {generation: message.generation});
+          }
+          continue;
+        }
         if (message && message.direction === AUDIO_DOWNLINK && message.payload) this._onDownlink(message.payload);
       } catch (error) {
         this.stopPlayback();
