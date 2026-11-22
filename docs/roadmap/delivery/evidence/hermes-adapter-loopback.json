@@ -1,0 +1,15 @@
+{
+  "active_after_detach": "running",
+  "cancel_acknowledgement": "no terminal evidence",
+  "cancel_terminal": "cancelled",
+  "hermes_revision": "0f602c5f6f18615632535251d62a2db74ce93b69",
+  "model": "deterministic loopback",
+  "model_calls": 2,
+  "model_tool_count": 0,
+  "no_handle_recovery": "unresolved",
+  "retained_result_matched": true,
+  "runtime": "3.14.10",
+  "submitted": "submitted",
+  "terminal": "completed",
+  "wrong_credential": "credentials_rejected"
+}

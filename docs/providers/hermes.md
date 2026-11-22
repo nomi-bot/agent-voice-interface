@@ -1,6 +1,6 @@
 # Hermes durable adapter
 
-[JEV-27](../roadmap/delivery/27-hermes-adapter.md) defines the adapter contract. The transport in the contract tests is injected. Real transport enablement depends on the [JEV-26 probe evidence](../roadmap/delivery/26-hermes-contract.md).
+[JEV-27](../roadmap/delivery/27-hermes-adapter.md) defines the adapter contract. The injected transport supports contract tests. The HTTP transport consumes [JEV-26's pinned runtime evidence](https://github.com/nomi-bot/agent-voice-interface/blob/9834b5dd7d6964ee5ecd9a1ee710ef0b1dbb7a2f/docs/roadmap/delivery/evidence/hermes-runs.json).
 
 ## Run service handoff
 
@@ -9,15 +9,36 @@ The service verifies the principal and checks permissions before every operation
 | Example | Contract |
 | --- | --- |
 | Submit | `submit(HermesTask("read_only", {"query": "summarize the greeting"}), HermesExecutionContext("owner-a"), correlation_id="avi-request-1")` |
-| Accepted | `HermesRun("remote-run-1", AgentRunState.RUNNING)` |
+| Accepted | `HermesRun("remote-run-1", AgentRunState.SUBMITTED)` persists the handle before the first status read. |
 | Settled observation | `HermesRun("remote-run-1", AgentRunState.COMPLETED, result="greeting")` |
 | Cancellation acknowledgement | `cancel(handle, context, previous=active)` can return `None`. The active observation remains current until terminal evidence arrives. |
 | Recovery | `reconcile(context, correlation_id=key, handle=known_handle, previous=last_observation)` returns available evidence. A `None` response leaves the intent unresolved. |
 
 `HermesError.code` is safe to classify and `HermesError.outcome` is `denied`, `unsupported`, `failed` or `uncertain`. A failed read leaves the previous observation available. An ambiguous submit returns `uncertain` plus the durable correlation ID. Closing the adapter releases local transport resources. Accepted work keeps its existing remote lifecycle.
 
-## Capabilities and test scope
+## Pinned loopback HTTP transport
 
-The fake transport exercises status, cancellation, progress and read-only lookup by correlation. Optional capabilities default to disabled and require verified support on the pinned runtime. A deployed transport with no read-only correlation lookup can reconcile a known handle by status. Unresolved submissions remain available for operator reconciliation.
+Install the optional dependency with `python -m pip install '.[hermes]'`. Construct `HermesAgentAdapter(HermesHttpTransport(origin, api_key))` with a numeric loopback origin and a dedicated server bearer credential. Use Hermes commit `0f602c5f6f18615632535251d62a2db74ce93b69` and an isolated profile with `platform_toolsets.api_server` set to an empty list. The [JEV-26 launcher](https://github.com/nomi-bot/agent-voice-interface/blob/9834b5dd7d6964ee5ecd9a1ee710ef0b1dbb7a2f/docs/roadmap/delivery/evidence/probe_hermes_runs.py) provides the profile configuration used in the probe. Keep the bearer in server configuration and the profile's execution environment isolated.
 
-`python -m unittest discover -s tests -p 'test_jev27_hermes_adapter.py' -v` runs the fake transport cases. Real acceptance still requires a pinned Hermes run, its status and result, a permission refusal, and a runtime demonstration of each advertised capability.
+The HTTP adapter accepts the `read_only` task kind and one nonblank `query` string of up to 4096 characters. It sends the persisted correlation ID as the idempotency key. Generate a fresh correlation ID for each durable admission across principals sharing a Hermes profile. An accepted HTTP receipt supplies the handle. A subsequent status read confirms execution and returns the bounded result. A pending human approval remains an active run. Direct credential or permission refusals become typed denials.
+
+| Capability | Pinned HTTP behavior |
+| --- | --- |
+| Status and result | Enabled. A fresh adapter can read a retained result by handle. |
+| Cancellation | Enabled. A stop acknowledgement leaves the prior active state current. A terminal status confirms cancellation. |
+| Progress | Disabled. |
+| Read-only correlation lookup | Disabled. Missing or unknown evidence remains unresolved. |
+
+## Verification
+
+`python -m unittest discover -s tests -p 'test_jev27_hermes*.py' -v` exercises the injected transport and HTTP wire mapping. The [redacted loopback result](../roadmap/delivery/evidence/hermes-adapter-loopback.json) records the actual pinned Hermes daemon with CPython 3.14.10 and a deterministic local model. The test reads a completed result after reattachment, observes an active run after detach, cancels it explicitly, and checks credential denial. Both model calls received zero tools.
+
+With the JEV-26 dependencies installed and a checkout of the pinned Hermes source, run the probe using the launcher from JEV-26 or the integrated dev branch.
+
+```sh
+PYTHONPATH=src python docs/roadmap/delivery/evidence/probe_hermes_adapter.py \
+  --launcher /path/to/probe_hermes_runs.py \
+  --checkout /path/to/pinned/hermes-agent
+```
+
+Authenticated gateway composition and durable recovery against the integrated service remain integration gates.
