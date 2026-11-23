@@ -2,6 +2,9 @@
 
 [Linear issue](https://linear.app/jevenzzh/issue/JEV-28) · [Six M2 exit gates](../milestones.md#m2-exit-gates). Split implementation into independent store/replay, principal/authorization, and crash/cutover test modules on one issue branch. The store owner owns schema/migrations. Integrate verified remote behavior after JEV-27.
 
+The [proposed AVIP extension](../../protocols/avip-durable-runs-v1.md) defines the
+wire handoff and links the synthetic protocol vectors.
+
 **Storage contract.** Use a transactional local store for the loopback v0.1 deployment (SQLite is the proposed default). Persist owner, run ID, request ID and canonical payload digest, remote handle, dispatch/reconciliation state, lifecycle state, timestamps, expiry and latest cursor. Unique (owner, request ID) serializes concurrent submissions. Append events and update snapshots atomically. Persist intent before contacting Hermes. Keep uncertain dispatch separate from failed execution. A crash between remote acceptance and handle persistence must not produce a second task.
 
 **Identity and access.** Specify a loopback test credential issuer/trusted verifier, expiration and revocation, principal derivation and permission checks on submit, status, result, progress, attach and cancel. Bind the verified principal to the connection. Ignore any client-supplied owner. Authentication must work for both browser and headless clients without credentials in URLs, logs or reports. Missing or invalid credentials deny durable operations; existing media-only sessions remain usable.
