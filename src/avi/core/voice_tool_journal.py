@@ -50,21 +50,23 @@ class VoiceToolJournal:
                 )"""
             )
 
-    def begin(self, call: VoiceCall, fingerprint: str) -> bool:
+    def begin(self, call: VoiceCall, fingerprint: str) -> tuple[bool, VoiceToolDelivery]:
+        """Atomically distinguish a first delivery from an existing journal row."""
         with closing(sqlite3.connect(self._path)) as db, db:
-            db.execute(
+            inserted = db.execute(
                 """INSERT INTO voice_tool_deliveries
                    (session_id, turn_id, response_id, call_id, request_id, fingerprint)
                    VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(session_id, call_id) DO NOTHING""",
                 (call.session_id, call.turn_id, call.response_id, call.call_id, call.request_id, fingerprint),
-            )
-            saved_fingerprint, delivery = db.execute(
-                "SELECT fingerprint, delivery FROM voice_tool_deliveries WHERE session_id = ? AND call_id = ?",
+            ).rowcount == 1
+            saved_fingerprint, *record = db.execute(
+                """SELECT fingerprint, turn_id, response_id, request_id, run_id, delivery
+                   FROM voice_tool_deliveries WHERE session_id = ? AND call_id = ?""",
                 (call.session_id, call.call_id),
             ).fetchone()
             if saved_fingerprint != fingerprint:
                 raise VoiceCallConflict("Voice tool call payload changed")
-            return delivery == "pending"
+            return inserted, VoiceToolDelivery(*record)
 
     def bind_run(self, call: VoiceCall, run_id: str) -> None:
         with closing(sqlite3.connect(self._path)) as db, db:

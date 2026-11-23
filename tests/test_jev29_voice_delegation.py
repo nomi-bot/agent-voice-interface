@@ -76,6 +76,12 @@ class ScriptedRuns:
         await self.release_dispatch.wait()
         return run
 
+    async def lookup_admitted(self, connection, request_id, kind, arguments):
+        if connection in self.revoked:
+            raise PermissionError("private authorization diagnostic")
+        existing = self.submissions.get((connection, request_id))
+        return existing[1] if existing and existing[0] == (kind, arguments) else None
+
     async def result(self, connection, run_id):
         if connection in self.revoked or self.owners.get(run_id) != connection:
             raise PermissionError("private owner diagnostic")

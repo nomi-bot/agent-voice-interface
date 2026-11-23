@@ -438,6 +438,25 @@ class SQLiteRunStore:
             row["terminal_at"] = now
         events.append((target.value, payload))
 
+    def lookup_admitted(
+        self, owner: str, request_id: str, kind: str, arguments: dict[str, JsonValue],
+        *, backend_scope: str,
+    ) -> RunSnapshot | None:
+        """Read proved admission without reserving or exposing a provider handle."""
+        if not isinstance(request_id, str) or _IDENTIFIER.fullmatch(request_id) is None:
+            return None
+        digest = sha256(canonical_task(kind, arguments).encode("ascii")).hexdigest()
+        with self._transaction() as db:
+            row = db.execute(
+                """
+                SELECT * FROM durable_runs
+                 WHERE owner = ? AND request_id = ? AND payload_digest = ?
+                   AND backend_scope = ? AND dispatch = ? AND handle IS NOT NULL
+                """,
+                (owner, request_id, digest, backend_scope, DispatchState.ACCEPTED),
+            ).fetchone()
+            return None if row is None else self._snapshot(dict(row), self._clock())
+
     def intent(self, owner: str, run_id: str) -> DispatchIntent:
         with self._transaction() as db:
             row = self._owned(db, owner, run_id)
