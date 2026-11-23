@@ -7,6 +7,7 @@ from typing import Literal, Protocol
 
 from avi.core.durable_auth import AccessDenied, AuthenticatedConnection, LoopbackCredentials, RunPermission
 from avi.core.durable_store import (
+    AdmissionsClosed,
     DispatchIntent,
     DispatchState,
     JsonValue,
@@ -75,6 +76,11 @@ class DurableRunService:
         self._legacy_cutover = legacy_cutover
         self._operation_timeout = operation_timeout
 
+    def _allows_admission(self) -> bool:
+        return self._admissions_open and (
+            self._legacy_cutover is None or self._legacy_cutover.durable_enabled
+        )
+
     async def submit(
         self,
         connection: AuthenticatedConnection | None,
@@ -86,9 +92,7 @@ class DurableRunService:
         # Take a private copy before awaiting. The sent content must match the
         # digest even if caller-owned arguments change during the database write.
         copied_arguments = json.loads(canonical_task(kind, arguments))["arguments"]
-        admissions_open = self._admissions_open and (
-            self._legacy_cutover is None or self._legacy_cutover.durable_enabled
-        )
+        admissions_open = self._allows_admission()
         reserved = await asyncio.to_thread(
             self._store.reserve, owner, request_id, kind, copied_arguments,
             allow_new=admissions_open, backend_scope=self._backend_scope,
@@ -106,6 +110,11 @@ class DurableRunService:
         except AccessDenied:
             await asyncio.to_thread(self._store.dispatch_error, run_id, outcome="denied")
             raise
+        # Policy can change while the reserve or claim transaction is awaited.
+        # We own this claim, but no provider call has been made.
+        if not self._allows_admission():
+            await asyncio.to_thread(self._store.dispatch_error, run_id, outcome="denied")
+            raise AdmissionsClosed("Durable submissions are disabled")
 
         try:
             async with asyncio.timeout(self._operation_timeout):
