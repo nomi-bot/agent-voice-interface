@@ -5,17 +5,19 @@ audio. It does not reconnect, and it does not start an agent run.
 """
 
 from collections.abc import Mapping
+import json
 
 from websockets.exceptions import ConnectionClosed
 
 from avip_client.errors import AvipError
 from avip_client.framing import UplinkClock, unpack_frame
-from avip_client.messages import parse_server_text, session_start
+from avip_client.messages import PROTOCOL, parse_server_text, session_start
 
 # Unread messages held by the library before it pauses the socket. This is
 # transport backpressure, not an application reject. The browser client uses
 # the same depth and then fails the session.
 _RECEIVE_QUEUE = 8
+_FRAME_LIMIT = 16 * 1024
 
 
 class AvipClient:
@@ -67,7 +69,7 @@ class AvipClient:
             origin=self.origin,
             compression=None,
             proxy=None,
-            max_size=16 * 1024,
+            max_size=_FRAME_LIMIT,
             max_queue=_RECEIVE_QUEUE,
             user_agent_header=None,
         )
@@ -85,6 +87,13 @@ class AvipClient:
         """True after the socket has ended. The client does not reconnect."""
         return self._closed
 
+    @property
+    def remote_address(self) -> tuple | None:
+        """Return the connected transport peer address."""
+
+        self._require_open()
+        return self._ws.remote_address
+
     async def start(self) -> dict:
         """Send ``session.start`` and return the ``session.ready`` object."""
         if self._started:
@@ -100,6 +109,30 @@ class AvipClient:
             raise AvipError("invalid_message", "type")
         self._started = True
         return message
+
+    async def send_control(self, message: dict) -> None:
+        """Send one AVIP v1 object after the handshake."""
+
+        self._require_open()
+        if (
+            not self._started
+            or type(message) is not dict
+            or message.get("protocol") != PROTOCOL
+            or type(message.get("type")) is not str
+        ):
+            raise AvipError("invalid_message")
+        try:
+            raw = json.dumps(message, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
+            length = len(raw.encode("utf-8"))
+        except (TypeError, ValueError, RecursionError):
+            raise AvipError("invalid_message") from None
+        if length > _FRAME_LIMIT:
+            raise AvipError("frame_too_large")
+        try:
+            await self._ws.send(raw)
+        except ConnectionClosed:
+            self._closed = True
+            raise
 
     async def send_uplink(self, payload: bytes) -> None:
         """Send one uplink frame.
