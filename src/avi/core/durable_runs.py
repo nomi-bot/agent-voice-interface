@@ -137,6 +137,20 @@ class DurableRunService:
         self._credentials.require(connection, RunPermission.SUBMIT)
         return snapshot
 
+    async def lookup_admitted(
+        self, connection: AuthenticatedConnection | None, request_id: str,
+        kind: str, arguments: dict[str, JsonValue],
+    ) -> RunSnapshot | None:
+        """Read an existing dispatch for the authenticated owner; never submit."""
+        owner = self._credentials.require(connection, RunPermission.STATUS)
+        copied_arguments = json.loads(canonical_task(kind, arguments))["arguments"]
+        snapshot = await asyncio.to_thread(
+            self._store.lookup_admitted, owner, request_id, kind, copied_arguments,
+            backend_scope=self._backend_scope,
+        )
+        self._credentials.require(connection, RunPermission.STATUS)
+        return snapshot
+
     async def status(self, connection: AuthenticatedConnection | None, run_id: str) -> RunSnapshot:
         owner = self._credentials.require(connection, RunPermission.STATUS)
         intent = await asyncio.to_thread(self._store.intent, owner, run_id)

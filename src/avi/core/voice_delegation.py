@@ -59,6 +59,9 @@ class VoiceRuns[Connection](Protocol):
         self, connection: Connection, request_id: str, kind: str, arguments: dict[str, str],
     ) -> RunSnapshot: ...
     async def result(self, connection: Connection, run_id: str) -> RunResult: ...
+    async def lookup_admitted(
+        self, connection: Connection, request_id: str, kind: str, arguments: dict[str, str],
+    ) -> RunSnapshot | None: ...
 
 
 @dataclass(frozen=True)
@@ -164,7 +167,10 @@ class VoiceToolSession[Connection]:
         return self._closed or self._active[call.call_id].expired
 
     async def _dispatch(self, call: VoiceCall, inputs: _ToolInput) -> None:
-        if not await asyncio.to_thread(self._journal.begin, call, inputs.fingerprint):
+        first_delivery, saved = await asyncio.to_thread(self._journal.begin, call, inputs.fingerprint)
+        if not first_delivery:
+            if saved.run_id is None and saved.request_id == call.request_id:
+                await self._recover_admission(call, inputs)
             return
         if self._expired(call):
             await asyncio.to_thread(self._journal.transition, call, "pending", "expired")
@@ -187,6 +193,20 @@ class VoiceToolSession[Connection]:
             # The send may already have reached the provider. Retain the attempt.
             return
         await asyncio.to_thread(self._journal.transition, call, "attempted", "acknowledged")
+
+    async def _recover_admission(self, call: VoiceCall, inputs: _ToolInput) -> None:
+        """Rebind private bookkeeping only, never answer a possibly stale turn."""
+        if self._connection is None or inputs.name != DELEGATE_TOOL or inputs.error:
+            return
+        try:
+            async with asyncio.timeout(self._timeout):
+                snapshot = await self._runs.lookup_admitted(
+                    self._connection, call.request_id, READ_ONLY, {"query": inputs.value},
+                )
+        except (PermissionError, TimeoutError):
+            return
+        if snapshot is not None:
+            await asyncio.to_thread(self._journal.bind_run, call, snapshot.run_id)
 
     async def _reply(self, call: VoiceCall, inputs: _ToolInput) -> tuple[dict, str | None]:
         if inputs.error:
