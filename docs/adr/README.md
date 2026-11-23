@@ -32,6 +32,8 @@ this PR are 006–010; the draft 0001–0005 names were removed to avoid collisi
   operator-supplied model code. `GeminiLiveProvider` now implements
   `VoiceProvider`; the gateway still does not open it. See
   [the provider record](../providers/gemini-live.md).
+- [012: Hermes Runs transport](012-hermes-runs-transport.md) proposes the
+  pinned loopback contract for submit, polling, and recovery.
 
 ## Review policy
 
