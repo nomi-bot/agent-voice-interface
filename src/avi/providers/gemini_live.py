@@ -234,7 +234,7 @@ class _EventQueue:
         self._wake.set()
 
 
-def live_connect_config(tool_behavior: str):
+def live_connect_config(tool_behavior: str, *, enable_delegation_tools: bool = False):
     """Native-audio Live config. The model id is not included.
 
     Session resumption is left unset. The adapter closes on GoAway instead of
@@ -260,10 +260,38 @@ def live_connect_config(tool_behavior: str):
         parameters=types.Schema(type=types.Type.OBJECT, properties={}),
         behavior=behavior,
     )
+    declarations = [declaration]
+    if enable_delegation_tools:
+        from avi.core.voice_delegation import DELEGATE_TOOL, RESULT_TOOL
+
+        # The Live Developer API rejects additionalProperties. The router validates exact keys.
+
+        declarations.extend([
+            types.FunctionDeclaration(
+                name=DELEGATE_TOOL,
+                description="Submit a user-approved, bounded read-only task. Return its AVI run ID.",
+                parameters=types.Schema(
+                    type=types.Type.OBJECT,
+                    properties={"query": types.Schema(type=types.Type.STRING, min_length=1, max_length=4096)},
+                    required=["query"],
+                ),
+                behavior=behavior,
+            ),
+            types.FunctionDeclaration(
+                name=RESULT_TOOL,
+                description="Retrieve the retained result of an AVI run for this authenticated caller.",
+                parameters=types.Schema(
+                    type=types.Type.OBJECT,
+                    properties={"run_id": types.Schema(type=types.Type.STRING, min_length=1, max_length=128)},
+                    required=["run_id"],
+                ),
+                behavior=behavior,
+            ),
+        ])
     return types.LiveConnectConfig(
         response_modalities=[types.Modality.AUDIO],
         output_audio_transcription=types.AudioTranscriptionConfig(),
-        tools=[types.Tool(function_declarations=[declaration])],
+        tools=[types.Tool(function_declarations=declarations)],
     )
 
 
@@ -286,6 +314,7 @@ class GeminiLiveProvider:
         env: Mapping[str, str] | None = None,
         connector: Callable[[], Awaitable[object]] | None = None,
         tool_behavior: str = "NON_BLOCKING",
+        enable_delegation_tools: bool = False,
         output_rate_hz: int = OUTPUT_SAMPLE_RATE_HZ,
         max_uplink_chunks: int = _MAX_UPLINK_CHUNKS,
         max_audio_events: int = _MAX_AUDIO_EVENTS,
@@ -301,6 +330,7 @@ class GeminiLiveProvider:
             response_cancellation=True,
         )
         self.tool_behavior = tool_behavior
+        self._enable_delegation_tools = enable_delegation_tools
         self.output_rate_hz = output_rate_hz
         self.model: str | None = None
         self.sent_uplink_bytes = 0
@@ -471,7 +501,9 @@ class GeminiLiveProvider:
             client = genai.Client(api_key=self._secret, vertexai=False)
             cm = client.aio.live.connect(
                 model=plan.model,
-                config=live_connect_config(self.tool_behavior),
+                config=live_connect_config(
+                    self.tool_behavior, enable_delegation_tools=self._enable_delegation_tools,
+                ),
             )
             session = await cm.__aenter__()
         except Exception as exc:

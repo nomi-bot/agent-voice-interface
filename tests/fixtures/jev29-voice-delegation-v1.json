@@ -1,0 +1,32 @@
+{
+  "version": "avi.voice-delegation/1",
+  "submission": {
+    "event": {
+      "kind": "tool_call",
+      "payload": {"id": "call-1", "name": "avi_delegate_read_only", "args": {"query": "Read a summary"}}
+    },
+    "reply": {"output": {"status": "submitted", "run_id": "run-1"}}
+  },
+  "uncertain_submission": {
+    "event": {
+      "kind": "tool_call",
+      "payload": {"id": "call-1", "name": "avi_delegate_read_only", "args": {"query": "Read a summary"}}
+    },
+    "reply": {"output": {"status": "pending_reconciliation", "run_id": "run-1"}}
+  },
+  "interruption": {
+    "playback_event": {"kind": "interrupted", "payload": {"source": "server"}},
+    "call_expiry_event": {"kind": "error", "payload": {"code": "tool_call_cancelled", "ids": ["call-1"]}},
+    "old_call_reply": null
+  },
+  "retained_result": {
+    "event": {
+      "kind": "tool_call",
+      "payload": {"id": "call-1", "name": "avi_read_run_result", "args": {"run_id": "run-1"}}
+    },
+    "reply": {"output": {"status": "completed", "run_id": "run-1", "result": "A synthetic retained result"}}
+  },
+  "access_denied": {
+    "error": {"code": "access_denied"}
+  }
+}
