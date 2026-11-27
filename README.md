@@ -3,52 +3,37 @@
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Last commit](https://img.shields.io/github/last-commit/nomi-bot/agent-voice-interface)](https://github.com/nomi-bot/agent-voice-interface/commits/main)
 [![Commit activity](https://img.shields.io/github/commit-activity/m/nomi-bot/agent-voice-interface)](https://github.com/nomi-bot/agent-voice-interface/graphs/commit-activity)
-![Status: initialization skeleton](https://img.shields.io/badge/status-initialization_skeleton-yellow.svg)
 
 Give every AI agent and robot a natural voice.
 
 AVI is an open-source, plug-and-play voice interaction layer, independent of
 agent runtimes and model vendors. It is not an agent framework.
 
-## Current status: initialization skeleton
+## What runs today
 
-The current implementation supplies a Python 3.12+ FastAPI gateway, four adapter contracts,
-an asynchronous mock agent, a JSON WebSocket control protocol, tests and CI.
-The original Apache-2.0 LICENSE is preserved.
+The Python 3.12+ loopback gateway serves browser and headless clients on
+`/ws/avip`. It supports 16 kHz PCM, a mock audio mirror, and optional Gemini
+Live audio. The browser can flush local playback, interrupt an active response
+when negotiated, and reconnect with a fresh voice session. The headless
+simulator exercises the same media route. An optional client-side ROS 2 bridge
+exercises a synthetic sensor and an in-memory action.
 
-**The gateway still has no live voice session and no Hermes integration.**
-`GeminiLiveProvider` implements the `VoiceProvider` port
-([provider record](docs/providers/gemini-live.md)). `/ws/avip` does not construct
-it. A browser page can capture a microphone and play the mock PCM mirror. No
-full-duplex, latency, or macOS runtime claim has been validated against Gemini.
-The default install has no Google SDK. The optional `gemini-live` extra pins
-`google-genai==2.34.0` for the adapter and the compatibility smoke in
-[ADR-011](docs/adr/011-gemini-live-compatibility.md). Both read `GEMINI_API_KEY`
-and `GEMINI_LIVE_MODEL` from the environment and do not embed a model id.
+An opt-in single-owner launcher connects AVIP to a dedicated Hermes Run API,
+persists authorized tasks in SQLite and supports finding recent runs, replaying
+updates and retrieving results after disconnect or restart. Uncertain provider
+outcomes remain available for reconciliation. The plain Uvicorn entry point
+keeps durable controls disabled. Legacy `/ws` offers a session-owned mock agent.
 
-M0 is in progress. The gateway validates the AVIP v1 session handshake and serves
-it on `/ws/avip`, together with binary media frames once audio input is
-negotiated. A ready session lasts only as long as that socket; when the socket
-closes, the session id and its media queue are gone. The development gateway
-advertises no audio, camera, display, or robot capability unless
-`AVIP_MOCK_MEDIA=1`, which enables the same PCM mirror for every client. `/ws`
-still uses the legacy control protocol below. The headless SDK (`avip_client`)
-and the browser adapter (`clients/browser/avip-client.js`) both speak `/ws/avip`.
-`clients/browser/voice.js` captures microphone audio into that same uplink frame
-and plays downlink PCM. A mock sink drains
-accepted uplink frames on that socket. It is not a voice provider.
-VoiceSession, VoiceResponse and AgentRun transitions are implemented in core.
-`/ws/avip` records connecting, active and closed for that socket and still
-does not drive reconnect, voice responses or agent runs. The remaining control
-messages are still ahead, so M0 is not complete.
+The [milestone gates](docs/roadmap/milestones.md) track system acceptance.
+Reproduce the [headless scenarios](clients/robot/README.md),
+[browser fault checks](docs/roadmap/delivery/evidence/browser-duplex.md) and
+[release qualification](docs/roadmap/delivery/release.md).
 
 ## Local development (macOS / Mac Mini)
 
-Install Python 3.12 or newer (for example, Homebrew: `brew install python@3.12`).
+From a checkout of this revision, install Python 3.12 or newer (for example, Homebrew: `brew install python@3.12`).
 
 ```sh
-git clone https://github.com/nomi-bot/agent-voice-interface.git
-cd agent-voice-interface
 python3.12 -m venv .venv
 source .venv/bin/activate
 python -m pip install -e '.[dev,gemini-live]'
@@ -57,20 +42,61 @@ python -m uvicorn avi.main:app --host 127.0.0.1 --port 8000 --ws-max-size 16384 
 
 Check `http://127.0.0.1:8000/health` or `/docs`. No credentials are needed for
 the mock. `.env.example` names the server-side key and the Live model variable.
-This skeleton does not load environment files. Never commit a populated `.env`.
+Set these variables in the server environment. Never commit a populated `.env`.
 
 ```sh
 python -m unittest discover -s tests -v
 ```
 
+## Run the local Hermes gateway
+
+Use a dedicated Hermes API server at a numeric loopback origin. The example
+assumes port 8642, a configured model, `platform_toolsets.api_server: []`, and
+a dedicated API bearer. Set `HERMES_API_KEY` to the same value as Hermes'
+`API_SERVER_KEY` in the AVI server environment. The [Hermes integration
+record](docs/providers/hermes.md) identifies the pinned upstream revision and
+tested profile. Stop the plain gateway before starting this launcher.
+
+```sh
+python -m pip install -e '.[hermes]'
+python -m avi.local_gateway --state-dir ~/.avi-local --owner demo \
+  --hermes-origin http://127.0.0.1:8642 --backend-scope local-demo-v1 \
+  --allow-query 'Summarize the greeting.'
+```
+
+The launcher binds port 8000 and creates a private state directory. On
+`http://127.0.0.1:8000/voice`, expand **Local agent tasks**. Paste the value
+from `~/.avi-local/client.grant` into **Local grant**. **Find my runs** lists
+up to 16 recent IDs. Choose one, paste the grant again and use **Read result**
+or **Replay updates**. These operations work without a microphone or Gemini.
+An empty list is expected before the first task.
+
+For voice delegation, install the `gemini-live` extra and configure
+`GEMINI_API_KEY` and `GEMINI_LIVE_MODEL` before starting the launcher. Paste
+the grant, select **Enable agent tasks on my next voice session**, then start
+the microphone. The example authorizes exactly `Summarize the greeting.`
+including capitalization and punctuation. The tool argument must match that
+string. Each additional approved query requires its own `--allow-query`.
+
+The grant expires after 900 seconds by default. Set `--grant-seconds` to a
+positive lifetime at startup. To rotate, stop the launcher and restart with
+the same state directory, owner and backend scope. Paste the newly issued
+grant for subsequent connections. To suspend submissions and user-requested
+cancellation, restart with the same settings and replace `--allow-query …`
+with `--read-only`. Authorized recovery and reads continue. Change the
+nonsecret backend scope when the Hermes origin, profile or credential epoch
+changes so existing handles stay associated with their original backend.
+
 ## Gemini Live provider
 
 `GeminiLiveProvider` speaks the existing port: 16 kHz uplink, 24 kHz downlink
 resampled to 16 kHz with a streaming converter, bounded queues, and
-`close` on connect failure, `GoAway`, and cancel. It declares one tool,
-`avi_ack`, with explicit `BLOCKING` or `NON_BLOCKING` behavior. The gateway
-does not open this session. `GET /health` still reports `voice: not_implemented`.
-Details, negative cases, and the deferred list are in
+`close` on connect failure, `GoAway`, and cancel. Its default tool is
+`avi_ack`. Durable voice sessions can also expose `avi_delegate_read_only` and
+`avi_read_run_result`. `/ws/avip`
+opens that session when `GEMINI_API_KEY` and `GEMINI_LIVE_MODEL` are both set.
+`GET /health` reports `voice` as `live`, `mock`, or `not_configured`.
+Details, the microphone soak, and the deferred list are in
 [the provider record](docs/providers/gemini-live.md).
 
 The compatibility smoke is unchanged. It opens one short Live session only when
@@ -192,15 +218,18 @@ async def main():
 asyncio.run(main())
 ```
 
-Leave `AVIP_MOCK_MEDIA` unset for the unit suite. Set it to `1` before this
-snippet, or `session.ready` reports every capability false and the binary frame
-closes the socket.
+Leave `AVIP_MOCK_MEDIA` and the Live variables unset for the unit suite. Set
+`AVIP_MOCK_MEDIA=1` before this snippet when Live is not configured, or
+`session.ready` reports every capability false and the binary frame closes
+the socket. With both Live variables set, the same snippet talks to Gemini
+instead of echoing.
 
 To hear the microphone come back through the speakers, start the gateway with
 the mock mirror enabled and open the voice page on that same origin. Use
 headphones. The page asks for microphone permission, sends 20 ms PCM uplink
-frames, and plays the mirrored 16 kHz downlink. Gemini Live’s 24 kHz output is
-not this profile and is not played as 16 kHz. **Stop playback** flushes only the
+frames, and plays 16 kHz downlink. On the mock path those bytes are the
+microphone again. On the Live path they are the provider after 24 kHz to
+16 kHz resampling in the gateway. **Stop playback** flushes only the
 local speaker. It does not send a control message and it does not close the
 session. If the WebSocket send queue reaches 8 unsent nominal frames, later
 microphone frames are dropped and counted. A dropped frame does not advance
@@ -216,8 +245,8 @@ AVIP_MOCK_MEDIA=1 python3.12 -m uvicorn avi.main:app --host 127.0.0.1 --port 800
 Open `http://127.0.0.1:8000/voice` (or `http://localhost:8000/voice` if that is
 the host you bound). `file://` and any other origin cannot use this page: the
 microphone needs a secure context, and the gateway only accepts those two
-origins. Leave `AVIP_MOCK_MEDIA` unset and the page reports that audio was not
-negotiated.
+origins. Leave Live unconfigured and `AVIP_MOCK_MEDIA` unset and the page
+reports that audio was not negotiated.
 
 The one-frame console paste is still
 [tests/fixtures/browser-avip-client.js](tests/fixtures/browser-avip-client.js).
@@ -242,10 +271,13 @@ probe, and the credential rule are in
 negative paths (permission denied, unplug, gateway stop) are listed on the
 voice page.
 
-That variable is exact: only `1` enables audio input and audio output. It does
-not enable a voice provider or robot actions. The mirror copies PCM into a
+That variable is exact: only `1` enables the mirror, and only when Live is
+not configured. It does not enable robot actions. The mirror copies PCM into a
 downlink frame. A mock sink on the same session takes accepted uplink frames
 and discards them, so a continuous sender is not stuck after eight frames.
+Live, when configured, forwards those frames to the provider instead of
+mirroring them. The provider drops its own overflow; the socket does not
+turn that into `queue_full`.
 `queue_full` still means the bounded queue rejected the newest frame. That
 happens when the sink is not taking frames as fast as they arrive. The socket
 stays open, and the refused frame keeps its sequence.
@@ -267,19 +299,17 @@ controls. Treat voice transcripts and tool arguments as untrusted input.
 
 Level-2 component overview from accepted ADRs (clients → AVIP media/control/events → Transport → Gateway core → VoiceProvider/AgentAdapter → Gemini Live / Hermes). ROS 2 bridge is client-side; v0.1 mock actions only.
 
-The drawing is the accepted direction beside the initialization skeleton. It does not mean Gemini Live, Hermes, or durable runs are implemented. `/ws/avip` serves the handshake and the M0 PCM mirror; it does not speak to a voice provider. The same map is in the [interactive overview](docs/architecture/avi-l2-architecture.html); [avi-l2-candidate.json](docs/architecture/avi-l2-candidate.json) is the source used to generate it.
+The Live voice mount and durable Hermes runtime use separate configuration. Enabling either keeps the same AVIP endpoint for both clients. The same map is in the [interactive overview](docs/architecture/avi-l2-architecture.html); [avi-l2-candidate.json](docs/architecture/avi-l2-candidate.json) is the source used to generate it.
 
 ## Documentation map
 
-- [Current architecture](docs/architecture.md): executable skeleton behavior and limitations.
-- [Target architecture](docs/architecture/overview.md): accepted device-neutral direction;
-  provider integration, AVIP and durable runs are planned capabilities.
+- [Current architecture](docs/architecture.md): gateway behavior and limitations.
+- [Target architecture](docs/architecture/overview.md): device-neutral ports and integration boundaries.
 - [Canonical roadmap](docs/roadmap/milestones.md): M0–M4 scope and required exit gates,
   including the complete M2 ownership, authorization, persistence and migration gates.
 - [AVIP draft](docs/protocols/avip-v1.md): `/ws/avip` handshake, binary media
   frames, error envelopes, and the decisions still open. Legacy `/ws` is a separate socket.
-- [ADR index and policy](docs/adr/README.md): one three-digit sequence, 001–010.
-  ADRs 001–005 remain accepted; 006–010 extend them with explicit lineage.
+- [ADR index and policy](docs/adr/README.md): design decisions and their implementation context.
 
 The [legacy roadmap](docs/roadmap.md) redirects to the canonical plan and maps its
 original milestones. v0.1 robotics scope is a simulator and optional ROS 2 bridge

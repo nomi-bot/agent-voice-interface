@@ -173,6 +173,22 @@ class VoiceTelemetryTests(unittest.TestCase):
         self.assertEqual(default.telemetry.report()["path"], "mock-mirror")
         self.assertEqual(default.telemetry.report()["scenario"], "gateway")
 
+    def test_provider_and_unknown_paths_do_not_infer_latency_from_pcm_frames(self):
+        for path in ("provider", "unknown", "other"):
+            telemetry = VoiceTelemetry(client="gateway", path=path, scenario="test")
+            telemetry.mark("first-uplink", 1)
+            telemetry.note_uplink(1)
+            telemetry.mark("first-downlink", 4)
+            telemetry.note_downlink(4)
+            telemetry.mark("playback-start", 5)
+            telemetry.note_audible(5)
+            report = telemetry.report()
+            self.assertEqual(report["path"], "provider" if path == "provider" else "unknown")
+            self.assertEqual(report["e2e"]["method"], "unmeasured")
+            self.assertEqual(report["e2e"]["uplinkToDownlink"]["count"], 0)
+            self.assertIsNone(report["e2e"]["uplinkToAudible"]["p95"])
+            self.assertIsNone(report["intervalsMs"]["downlinkToAudible"])
+
     def test_uplink_budget_matches_the_browser_thresholds(self):
         self.assertEqual(UPLINK_FRAME_BYTES, 664)
         self.assertEqual(uplink_queue_decision(0), "send")
@@ -345,6 +361,8 @@ class LiveMockProbeTests(unittest.IsolatedAsyncioTestCase):
         log = tempfile.TemporaryFile(mode="w+")
         env = os.environ.copy()
         env["AVIP_MOCK_MEDIA"] = "1"
+        for name in ("GEMINI_API_KEY", "GEMINI_LIVE_MODEL", "GOOGLE_API_KEY"):
+            env.pop(name, None)
         process = subprocess.Popen(
             [
                 sys.executable, "-m", "uvicorn", "avi.main:app",

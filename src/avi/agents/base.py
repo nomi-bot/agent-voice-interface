@@ -17,6 +17,10 @@ class Run:
     result: str | None = None
 
 
+class SubmissionRejected(ValueError):
+    """The legacy adapter confirmed it rejected the request before creating a run."""
+
+
 class AgentAdapter(Protocol):
     capabilities: AgentCapabilities
 

@@ -1,9 +1,19 @@
 import json
 
 from fastapi import WebSocket, WebSocketDisconnect
-from starlette.websockets import WebSocketDisconnected
+from starlette import websockets
 
 from avi.transports.base import TransportDisconnected, TransportFrameError
+
+
+# Newer Starlette versions use a separate RuntimeError for reads after close.
+_READ_DISCONNECTS = (
+    WebSocketDisconnect,
+    getattr(websockets, "WebSocketDisconnected", WebSocketDisconnect),
+)
+
+def _invalid_json_constant(_: str):
+    raise ValueError("Non-finite JSON constant")
 
 
 class WebSocketTransport:
@@ -25,15 +35,15 @@ class WebSocketTransport:
         """
         try:
             message = await self.websocket.receive()
-        except (WebSocketDisconnect, WebSocketDisconnected) as exc:
+        except _READ_DISCONNECTS as exc:
             raise TransportDisconnected from exc
         if message["type"] == "websocket.disconnect":
             raise TransportDisconnected
         text = message.get("text")
         if isinstance(text, str):
             try:
-                value = json.loads(text)
-            except json.JSONDecodeError:
+                value = json.loads(text, parse_constant=_invalid_json_constant)
+            except (ValueError, RecursionError):
                 raise TransportFrameError(binary=False) from None
             if not isinstance(value, dict):
                 raise TransportFrameError(binary=False)

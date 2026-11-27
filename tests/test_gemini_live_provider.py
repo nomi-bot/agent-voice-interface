@@ -2,6 +2,7 @@
 
 import asyncio
 from pathlib import Path
+from types import SimpleNamespace
 import traceback
 import unittest
 
@@ -198,6 +199,21 @@ class ProviderContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("GeminiLiveProvider", source)
         self.assertNotIn("GEMINI_API_KEY", source)
 
+    def test_usage_snapshot_ignores_unsafe_counts_without_enqueuing_events(self):
+        provider = GeminiLiveProvider(env={}, max_control_events=1)
+        self.assertIsNone(provider.latest_token_usage())
+        valid = SimpleNamespace(prompt_token_count=2**53 - 1, response_token_count=3)
+        provider._handle_message(SimpleNamespace(usage_metadata=valid))
+        self.assertEqual(provider.latest_token_usage().input_tokens, 2**53 - 1)
+        for count in (-1, 1.5, True, "3", 2**53, 10**500):
+            with self.subTest(count_type=type(count).__name__):
+                metadata = SimpleNamespace(prompt_token_count=count, response_token_count=0)
+                self.assertFalse(provider._handle_message(SimpleNamespace(usage_metadata=metadata)))
+                self.assertIsNone(provider.latest_token_usage().input_tokens)
+                self.assertEqual(provider.latest_token_usage().output_tokens, 0)
+        self.assertFalse(provider._handle_message(SimpleNamespace()))
+        self.assertEqual(provider.latest_token_usage().output_tokens, 0)
+
     async def test_missing_key_does_not_connect(self):
         provider = GeminiLiveProvider(env={"GOOGLE_API_KEY": "other-secret"})
         with self.assertRaises(ProviderNotConfigured):
@@ -387,6 +403,46 @@ class ProviderContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(done.kind, "turn_complete")
         await provider.close()
 
+    async def test_idle_cancel_does_not_drop_the_next_turn(self):
+        session = FakeSession()
+        provider = _provider(session)
+        await provider.start()
+        iterator = provider.events()
+        await provider.cancel_response()
+        await provider.cancel_response()
+        self.assertEqual(session.turns, [])
+        fresh = _pcm(4, 480)
+        await session.push(_audio_message(fresh, turn_complete=True))
+        first = await anext(iterator)
+        self.assertEqual(first.kind, "audio")
+        self.assertTrue(first.payload.startswith((4).to_bytes(2, "little", signed=True)))
+        boundary = await anext(iterator)
+        self.assertEqual(boundary.kind, "turn_complete")
+        await provider.close()
+
+    async def test_repeated_cancel_does_not_hold_the_following_turn(self):
+        session = FakeSession()
+        provider = _provider(session)
+        await provider.start()
+        iterator = provider.events()
+        await session.push(_audio_message(_pcm(3, 480)))
+        first = await anext(iterator)
+        self.assertEqual(first.kind, "audio")
+        await provider.cancel_response()
+        await provider.cancel_response()
+        self.assertEqual(session.turns, [(None, True)])
+        interrupted = await anext(iterator)
+        self.assertEqual(interrupted.kind, "interrupted")
+        await session.push(_Message(server_content=_Content([], turn_complete=True)))
+        boundary = await anext(iterator)
+        self.assertEqual(boundary.kind, "turn_complete")
+        fresh = _pcm(11, 480)
+        await session.push(_audio_message(fresh, turn_complete=True))
+        nxt = await anext(iterator)
+        self.assertEqual(nxt.kind, "audio")
+        self.assertTrue(nxt.payload.startswith((11).to_bytes(2, "little", signed=True)))
+        await provider.close()
+
     async def test_turn_boundary_does_not_keep_the_previous_tail(self):
         session = FakeSession()
         provider = _provider(session)
@@ -443,6 +499,9 @@ class ProviderContractTests(unittest.IsolatedAsyncioTestCase):
             connector=connect_cancel,
         )
         await provider.start()
+        iterator = provider.events()
+        await session.push(_audio_message(_pcm(2, 480)))
+        self.assertEqual((await anext(iterator)).kind, "audio")
         with self.assertLogs("avi.providers.gemini_live", level="WARNING") as captured:
             with self.assertRaises(ProviderSessionError) as caught:
                 await provider.cancel_response()

@@ -55,19 +55,34 @@
 <body>
   <main>
     <h1>AVI browser voice</h1>
-    <p>Microphone capture and speaker playback for the local AVIP gateway. This page uses the existing 16 kHz <code>pcm_s16le</code> frames. It plays that mock profile only. Gemini Live’s 24 kHz output is a provider rate and is not played as 16 kHz. This page is not a voice model, and it does not run an agent.</p>
+    <p>Microphone capture and speaker playback for the local AVIP gateway. This page uses the existing 16 kHz <code>pcm_s16le</code> frames. When the gateway is running Gemini Live, it resamples provider audio to that profile before framing it. This page does not call Gemini, does not see the API key, and does not run an agent.</p>
 
     <div id="origin" class="panel"></div>
 
     <div class="panel">
-      <p><strong>Permission.</strong> Start asks this page for the microphone. Samples leave the browser only as AVIP audio frames sent to this page’s own gateway. The mock sink discards uplink PCM. The mirror sends those same bytes back, and this page plays them. Nothing is written to disk.</p>
+      <p><strong>Permission.</strong> Start asks this page for the microphone. Samples leave the browser only as AVIP audio frames sent to this page’s own gateway. On the mock path the mirror sends those same bytes back. On the Live path the gateway sends provider audio instead. Nothing is written to disk.</p>
       <p><strong>Secure context.</strong> Browsers expose the microphone only on HTTPS, or on <code>http://localhost</code> and <code>http://127.0.0.1</code>. Opening the file directly (<code>file://</code>) or from another host will not prompt. This development gateway also accepts only <code>http://127.0.0.1:8000</code> and <code>http://localhost:8000</code>.</p>
-      <p><strong>Headphones.</strong> The mock path plays your microphone back through the speakers. Headphones keep that echo from feeding into the mic.</p>
+      <p><strong>Headphones.</strong> The mock path plays your microphone back through the speakers, and Live playback can feed the mic. Headphones keep that loop from building.</p>
     </div>
+
+    <details class="panel" id="runs" hidden>
+      <summary>Local agent tasks</summary>
+      <p>Paste an operator-issued grant for each connection. Read a previous run without opening the microphone, or enable tasks for a new voice session.</p>
+      <p><label>Local grant <input id="run-grant" type="password" autocomplete="off" spellcheck="false" maxlength="43"></label></p>
+      <p><label><input id="voice-tasks" type="checkbox"> Enable agent tasks on my next voice session</label></p>
+      <p><label>Run ID <input id="run-id" maxlength="128" autocomplete="off"></label>
+        <label>After cursor <input id="run-cursor" type="number" min="0" step="1" value="0"></label></p>
+      <button id="run-recent" type="button">Find my runs</button>
+      <select id="run-list" aria-label="Recent runs" hidden></select>
+      <button id="run-result" type="button">Read result</button>
+      <button id="run-attach" type="button">Replay updates</button>
+      <pre id="run-output" aria-live="polite"></pre>
+    </details>
 
     <p>
       <button id="start" type="button">Start microphone</button>
       <button id="stop-playback" type="button" class="secondary" disabled>Stop playback</button>
+      <button id="cancel-response" type="button" class="secondary" disabled>Cancel current answer</button>
       <button id="end" type="button" class="secondary" disabled>End session</button>
     </p>
     <div id="status-panel" class="panel">
@@ -78,14 +93,14 @@
     <dl>
       <dt>Uplink frames</dt><dd id="uplink">0</dd>
       <dt>Downlink frames</dt><dd id="downlink">0</dd>
-      <dt>Played frames</dt><dd id="played">0</dd>
+      <dt>Scheduled playback frames</dt><dd id="played">0</dd>
       <dt>Capture drops</dt><dd id="capture-drops">0</dd>
       <dt>Transmit drops</dt><dd id="transmit-drops">0</dd>
       <dt>Playback drops</dt><dd id="playback-drops">0</dd>
     </dl>
 
     <h2>Timing hooks</h2>
-    <p>Session clock only (<code>performance.now</code> on this page). <code>capture-start</code>, <code>session-start</code>, <code>first-uplink</code>, <code>first-downlink</code>, and <code>playback-start</code> share that clock. The JSON report below also stores one wall-clock anchor so the session can be placed on a timeline. Neither clock is the AVIP media timestamp, and neither is a cross-host latency.</p>
+    <p>Session clock only (<code>performance.now</code> on this page). <code>capture-start</code>, <code>session-start</code>, <code>first-uplink</code>, <code>first-downlink</code>, and <code>playback-start</code> share that clock. Playback-start records when Web Audio schedules a buffer. Audible onset requires a separate measurement. The JSON report below also stores one wall-clock anchor so the session can be placed on a timeline. Neither clock is the AVIP media timestamp, and neither is a cross-host latency.</p>
     <dl id="metrics">
       <dt>capture-start</dt><dd>—</dd>
       <dt>first-uplink</dt><dd>—</dd>
@@ -103,7 +118,7 @@
       <li>Allow the microphone, then press Stop playback. Uplink frames keep increasing, the speaker goes quiet, and the session stays open. That button does not send a cancel.</li>
       <li>Unplug the headset or stop the browser’s microphone. The page reports that the track ended, capture stops, and the session stays open until you end it or the socket closes.</li>
       <li>Stop the gateway. The page reports the disconnect and releases the microphone.</li>
-      <li>Start the gateway without <code>AVIP_MOCK_MEDIA=1</code>. The page reports that audio was not negotiated and releases the microphone.</li>
+      <li>Start the gateway with neither Live credentials nor <code>AVIP_MOCK_MEDIA=1</code>. The page reports that audio was not negotiated and releases the microphone.</li>
     </ul>
   </main>
   <script type="module">
@@ -112,6 +127,7 @@
 
     const startButton = document.querySelector("#start");
     const stopPlaybackButton = document.querySelector("#stop-playback");
+    const cancelResponseButton = document.querySelector("#cancel-response");
     const endButton = document.querySelector("#end");
     const statusNode = document.querySelector("#status");
     const statusPanel = document.querySelector("#status-panel");
@@ -131,9 +147,83 @@
       originNode.textContent = `Origin ${location.origin} is a localhost secure context this gateway accepts.`;
     }
 
+    const runsPanel = document.querySelector("#runs");
+    const grantInput = document.querySelector("#run-grant");
+    const voiceTasks = document.querySelector("#voice-tasks");
+    const runId = document.querySelector("#run-id");
+    const runCursor = document.querySelector("#run-cursor");
+    const recentButton = document.querySelector("#run-recent");
+    const runList = document.querySelector("#run-list");
+    const resultButton = document.querySelector("#run-result");
+    const attachButton = document.querySelector("#run-attach");
+    const runOutput = document.querySelector("#run-output");
+    const localTasks = location.origin === "http://127.0.0.1:8000";
+    runsPanel.hidden = !localTasks;
+
+    function consumeGrant() {
+      const grant = grantInput.value;
+      grantInput.value = "";
+      return grant;
+    }
+
+    async function readRun(operation) {
+      if (!localTasks || resultButton.disabled) return;
+      const replay = operation === "attach";
+      const discover = operation === "recent";
+      runList.hidden = true;
+      runList.replaceChildren();
+      const id = runId.value.trim();
+      const cursor = runCursor.valueAsNumber;
+      recentButton.disabled = resultButton.disabled = attachButton.disabled = true;
+      runOutput.textContent = "Connecting…";
+      const client = new AvipBrowserClient({
+        url: `ws://${location.host}/ws/avip`,
+        requestId: `lookup-${crypto.randomUUID()}`,
+        deviceId: "browser-run-lookup",
+        capabilities: {durable_runs: true, ...(discover ? {durable_run_discovery: true} : {})},
+      });
+      let grant = consumeGrant();
+      try {
+        await client.connect();
+        await client.start();
+        await client.authenticateRun(grant);
+        grant = null;
+        if (discover) {
+          const runs = await client.recentRuns();
+          runOutput.textContent = runs.length ? "Choose a run. Paste a grant to read or replay it." : "No recent runs.";
+          const prompt = new Option("Choose a run", "");
+          runList.replaceChildren(prompt, ...runs.map((row) => new Option(`${row.run_id} · ${row.state}`, row.run_id)));
+          runList.hidden = !runs.length;
+          return;
+        }
+        const response = await client.readRun(id, replay ? cursor : null);
+        runOutput.textContent = JSON.stringify(response, null, 2);
+        if (replay && id === runId.value.trim() && cursor === runCursor.valueAsNumber) {
+          runCursor.value = String(response.cursor);
+        }
+      } catch {
+        runOutput.textContent = "Could not read the run. Check the run ID, cursor, local grant and gateway configuration.";
+      } finally {
+        grant = null;
+        client.close();
+        recentButton.disabled = resultButton.disabled = attachButton.disabled = false;
+      }
+    }
+
+    recentButton.addEventListener("click", () => readRun("recent"));
+    resultButton.addEventListener("click", () => readRun("result"));
+    attachButton.addEventListener("click", () => readRun("attach"));
+    runList.addEventListener("change", () => {
+      runId.value = runList.value;
+      runCursor.value = "0";
+    });
+    runId.addEventListener("input", () => { runCursor.value = "0"; runOutput.textContent = ""; });
+
     let voice = null;
+    let ending = false;
 
     function render() {
+      cancelResponseButton.disabled = !voice?.running || voice.activeResponseId === null;
       const stats = voice ? voice.stats : null;
       document.querySelector("#uplink").textContent = stats ? String(stats.uplinkFrames) : "0";
       document.querySelector("#downlink").textContent = stats ? String(stats.downlinkFrames) : "0";
@@ -161,7 +251,7 @@
       if (detail && detail.message) return detail.message;
       if (name === "requesting-permission") return "Requesting microphone permission…";
       if (name === "connecting") return "Microphone is live. Opening the AVIP session…";
-      if (name === "live") return "Live. Microphone audio is going to the gateway, and mirrored audio is playing here. Use headphones.";
+      if (name === "live") return "Connected. Microphone audio is going to the gateway. Use headphones.";
       if (name === "avip-error") return "The gateway reported a media error. The page is still listening.";
       return name;
     }
@@ -185,10 +275,15 @@
 
     startButton.addEventListener("click", async () => {
       startButton.disabled = true;
+      endButton.disabled = false;
+      const tasksRequested = localTasks && voiceTasks.checked;
+      voiceTasks.checked = false;
+      let grant = tasksRequested ? consumeGrant() : null;
       const session = new BrowserVoice({
         onMetric() { render(); },
         onStats() { render(); },
         onStatus(name, detail) {
+          if (voice !== session) return;
           setStatus(describe(name, detail), warnings.has(name));
           render();
           if (name === "disconnected" || name === "ended" || name === "audio-unavailable" || name === "uplink-stalled") {
@@ -197,6 +292,7 @@
         },
       });
       voice = session;
+      ending = false;
       try {
         await session.start({
           connect: async (lease) => {
@@ -206,11 +302,14 @@
               requestId: `req-${suffix}`.slice(0, 128),
               deviceId: "browser-voice-001",
               capabilities: {
+                response_cancel: true,
                 audio_input: true,
+                voice_path_report: true,
                 audio_output: true,
                 camera: false,
                 display: false,
                 robot_actions: false,
+                ...(tasksRequested ? {durable_runs: true} : {}),
               },
             });
             // Ownership moves here, before the handshake. A later throw is
@@ -218,15 +317,29 @@
             lease.adopt(client);
             await client.connect();
             const ready = await client.start();
+            if (tasksRequested) await client.authenticateRun(grant);
+            grant = null;
             return {client, ready};
           },
         });
+        if (voice !== session || !session.running) return;
         stopPlaybackButton.disabled = false;
         endButton.disabled = false;
         render();
       } catch (error) {
+        if (voice !== session || ending) return;
         setStatus(error.message || "The voice session did not start.", true);
         resetButtons();
+      } finally {
+        grant = null;
+      }
+    });
+
+    cancelResponseButton.addEventListener("click", () => {
+      try {
+        voice?.cancelResponse();
+      } catch {
+        setStatus("The gateway connection closed before the answer could be cancelled.", true);
       }
     });
 
@@ -241,7 +354,10 @@
       endButton.disabled = true;
       stopPlaybackButton.disabled = true;
       const session = voice;
+      ending = true;
+      grantInput.value = "";
       if (session) await session.stop();
+      if (voice !== session) return;
       resetButtons();
       render();
     });

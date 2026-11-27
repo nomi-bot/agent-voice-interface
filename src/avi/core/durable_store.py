@@ -21,7 +21,7 @@ from avi.core.lifecycle import AGENT_RUN_TRANSITIONS, AgentRunState
 
 
 _IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}")
-_SCHEMA_VERSION = 1
+_SCHEMA_VERSION = 2
 _SCHEMA = (
     """
     CREATE TABLE durable_runs (
@@ -65,6 +65,17 @@ _SCHEMA = (
         PRIMARY KEY (session_id, run_id)
     )
     """,
+)
+
+# Version 2 adds write-ahead records for legacy work tracked by this gateway.
+_LEGACY_SCHEMA = (
+    "CREATE TABLE legacy_freeze (singleton INTEGER PRIMARY KEY CHECK (singleton = 1))",
+    """CREATE TABLE legacy_admissions (
+        ticket TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        run_id TEXT,
+        UNIQUE (session_id, run_id)
+    )""",
 )
 
 type JsonValue = None | bool | int | float | str | list[JsonValue] | dict[str, JsonValue]
@@ -117,6 +128,12 @@ class RunSnapshot:
     expired: bool
     failure_code: str | None
     reconciliation_pending: bool
+
+
+@dataclass(frozen=True)
+class RecentRun:
+    run_id: str
+    state: AgentRunState
 
 
 @dataclass(frozen=True)
@@ -223,9 +240,19 @@ class SQLiteRunStore:
             if version == 0:
                 for statement in _SCHEMA:
                     db.execute(statement)
+            if version in (0, 1):
+                for statement in _LEGACY_SCHEMA:
+                    db.execute(statement)
+                # Historical cutover receipts prove the old gate was frozen.
+                db.execute("INSERT INTO legacy_freeze SELECT 1 WHERE EXISTS "
+                           "(SELECT 1 FROM legacy_cutover_outcomes)")
                 db.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
             elif version != _SCHEMA_VERSION:
                 raise ValueError("Unsupported durable-run database schema")
+            db.execute(
+                "CREATE INDEX IF NOT EXISTS recent_runs_by_owner "
+                "ON durable_runs(owner, created_at DESC, run_id DESC)"
+            )
 
     @contextmanager
     def _transaction(self, *, write: bool = False) -> Iterator[sqlite3.Connection]:
@@ -457,6 +484,18 @@ class SQLiteRunStore:
             ).fetchone()
             return None if row is None else self._snapshot(dict(row), self._clock())
 
+    def recent(self, owner: str) -> tuple[RecentRun, ...]:
+        with self._transaction() as db:
+            rows = db.execute(
+                """
+                SELECT run_id, state FROM durable_runs
+                WHERE owner = ? AND (terminal_at IS NULL OR terminal_at > ?)
+                ORDER BY created_at DESC, run_id DESC LIMIT 16
+                """,
+                (owner, self._clock() - self.retention.results_ttl),
+            )
+            return tuple(RecentRun(row["run_id"], AgentRunState(row["state"])) for row in rows)
+
     def intent(self, owner: str, run_id: str) -> DispatchIntent:
         with self._transaction() as db:
             row = self._owned(db, owner, run_id)
@@ -572,14 +611,47 @@ class SQLiteRunStore:
                 (threshold,),
             )
 
-    def record_legacy_cutover(self, outcomes: tuple[LegacyOutcome, ...]) -> None:
+    def legacy_frozen(self) -> bool:
+        with self._transaction() as db:
+            return db.execute("SELECT 1 FROM legacy_freeze").fetchone() is not None
+
+    def freeze_legacy(self) -> None:
         with self._transaction(write=True) as db:
-            now = self._clock()
-            db.executemany(
-                "INSERT INTO legacy_cutover_outcomes VALUES (?, ?, ?, ?) "
-                "ON CONFLICT (session_id, run_id) DO NOTHING",
-                [(outcome.session_id, outcome.run_id, outcome.status, now) for outcome in outcomes],
+            db.execute("INSERT OR IGNORE INTO legacy_freeze VALUES (1)")
+
+    def reserve_legacy(self, session_id: str) -> str:
+        ticket = uuid4().hex
+        with self._transaction(write=True) as db:
+            if db.execute("SELECT 1 FROM legacy_freeze").fetchone() is not None:
+                raise AdmissionsClosed("Legacy submissions are disabled")
+            db.execute("INSERT INTO legacy_admissions VALUES (?, ?, NULL)", (ticket, session_id))
+        return ticket
+
+    def discard_rejected_legacy(self, ticket: str) -> None:
+        with self._transaction(write=True) as db:
+            db.execute("DELETE FROM legacy_admissions WHERE ticket = ? AND run_id IS NULL", (ticket,))
+
+    def bind_legacy(self, ticket: str, run_id: str) -> None:
+        with self._transaction(write=True) as db:
+            db.execute("UPDATE legacy_admissions SET run_id = ? WHERE ticket = ?", (run_id, ticket))
+
+    def unresolved_legacy(self) -> tuple[tuple[str, str, str | None], ...]:
+        with self._transaction() as db:
+            return tuple(tuple(row) for row in db.execute(
+                "SELECT ticket, session_id, run_id FROM legacy_admissions ORDER BY ticket"
+            ))
+
+    def settle_legacy(self, outcome: LegacyOutcome) -> None:
+        if outcome.status not in {"completed", "failed", "cancelled"}:
+            raise ValueError("Legacy settlement requires a terminal outcome")
+        with self._transaction(write=True) as db:
+            removed = db.execute(
+                "DELETE FROM legacy_admissions WHERE session_id = ? AND run_id = ?",
+                (outcome.session_id, outcome.run_id),
             )
+            if removed.rowcount and db.execute("SELECT 1 FROM legacy_freeze").fetchone():
+                db.execute("INSERT INTO legacy_cutover_outcomes VALUES (?, ?, ?, ?)",
+                           (outcome.session_id, outcome.run_id, outcome.status, self._clock()))
 
     def legacy_outcomes(self) -> tuple[LegacyOutcome, ...]:
         with self._transaction() as db:

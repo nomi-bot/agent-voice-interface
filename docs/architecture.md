@@ -1,57 +1,38 @@
-# Current skeleton architecture
+# Current gateway architecture
 
-This page describes executable behavior. See the [target architecture](architecture/overview.md)
-and [canonical roadmap](roadmap/milestones.md) for planned changes.
+The [target architecture](architecture/overview.md) defines the ports. Browser
+and simulated robot clients use the same AVIP route. The optional ROS 2 bridge
+runs on the client and maps synthetic observations to in-memory actions.
 
-Browser / future robot → TransportAdapter → VoiceOrchestrator →
-VoiceProvider and AgentAdapter. DeviceAdapter describes hardware capabilities.
+A connection to `/ws/avip` negotiates media and optional controls. A configured
+Gemini Live mount receives uplink PCM, resamples downlink audio and propagates
+turn interruptions. The mock mount mirrors PCM. The connection owns its
+session ID, response identifiers, media queues and provider resources. Closing
+the connection releases them.
 
-The control plane uses Python asyncio and FastAPI. Current executable scope is a
-local JSON WebSocket with session-owned mock tasks, plus `/ws/avip` for the AVIP
-handshake and mock PCM frames. `VoiceProvider` is implemented by
-`GeminiLiveProvider`, and the AVIP path does not call it. DeviceAdapter remains
-a contract only. The Gemini Live compatibility spike is
-[ADR-011](adr/011-gemini-live-compatibility.md); the adapter notes are in
-[the provider record](providers/gemini-live.md). The orchestrator contains no
-Hermes-specific logic. Agent submission returns a run immediately; status and
-cancellation are capability-gated. Future adapters must never block the event loop.
+The [local launcher](../README.md#run-the-local-hermes-gateway) binds a
+single-owner `DurableRuntime` to the FastAPI application. Each authenticated
+socket uses its own grant to call the shared run service. Voice tool calls and
+explicit AVIP submissions pass the same approved-query and owner checks.
+SQLite stores run ownership, dispatch information and bounded event history.
+The voice journal correlates tool calls across retries. On startup, the launcher
+reconciles known handles before admitting work. An ambiguous dispatch stays
+unresolved until the backend supplies evidence. The pinned Hermes adapter
+supports polling by handle; a missing handle limits reconciliation.
 
-`/ws` is the legacy control plane described below. `/ws/avip` runs one session
-driver for every device label: `session.start` to `session.ready`, then JSON
-control text and, when audio input was negotiated, binary frames through
-`unpack_frame`. A mock sink drains accepted uplink PCM for that socket; it is
-not a voice provider. The id, the sink task, and the media queue are dropped
-when the socket closes.
-That path does not construct an agent adapter or submit runs. `active_sessions`
-counts accepted sockets on both paths in this process. It is not a durable
-session table. The normative close codes and error envelopes are in the
-[AVIP draft](protocols/avip-v1.md).
+A new socket gets a new voice session and authenticates again for durable
+access. Clients can use an existing ID or negotiate discovery, select a recent
+run and replay from a cursor. Playback stop, response cancel and authorized
+task cancellation have distinct scopes. See the [durable extension](protocols/avip-durable-runs-v1.md)
+and [session lifecycles](architecture/session-lifecycle.md).
 
-`ControlSession` owns a receiver, one sequential agent worker, and one writer in
-an asyncio task group. Bounded operation/reply queues keep adapter latency and
-transport backpressure from accumulating unbounded work. The receiver handles
-`ping` and `stop_playback` directly; they can overtake agent replies. Disconnect,
-idle expiry and send failure cancel the sibling tasks before closing the agent.
-Operation, send and cleanup deadlines are distinct; an operation timeout returns
-an error without being reported as an idle timeout. Async adapters must propagate
-cancellation and clean up their own resources, including any remote submission
-whose result is unknown after a timeout. Python cannot forcibly stop a coroutine
-that suppresses cancellation or blocks the event loop.
-
-Stopping playback, cancelling a model response, and cancelling an agent run are
-separate operations. A provider interruption should flush client playback without
-implicitly cancelling a run. Target durable agent runs should outlive individual voice sessions;
-the mock deliberately cancels session-owned work on disconnect to avoid orphan tasks.
-Durable runs require explicit ownership, storage and reconnection policy. All
-[M2 exit gates](roadmap/milestones.md#m2-exit-gates) must pass before that behavior
-can replace the current session-owned policy.
-
-`avi.core.lifecycle` is the VoiceSession, VoiceResponse and AgentRun contract.
-Illegal edges fail closed. Playback stop, response interrupt, response failure,
-run cancellation and run failure are different operations, and closing a
-VoiceSession does not cancel an AgentRun. `/ws/avip` records connecting, active
-and closed on that machine. It does not enter reconnecting and does not create
-a response or a run. The legacy `/ws` mock is unchanged.
+On the legacy `/ws` route, `ControlSession` owns a receiver, sequential agent
+worker and writer. Bounded queues and deadlines limit outstanding work. Ping
+and local playback replies can overtake agent operations. In the default
+configuration, disconnect cancels that socket's mock tasks. During durable
+cutover, the launcher fences legacy admission. It keeps old runs under their
+original ownership and records confirmed outcomes before opening durable
+submissions.
 
 ## Protocol (initial control plane)
 
@@ -64,12 +45,10 @@ ready session with audio input negotiated. An AVIP `session.start` sent to
 `/ws` is an unknown legacy message. It does not open an AVIP session.
 Malformed messages produce a generic error; runs cannot be accessed across sessions.
 
-## Observability plan
+## Observability
 
-Only active session counting is implemented (process-local app state). Before
-performance claims, instrument monotonic timestamps for first response audio,
-gateway ingress/egress, interruption-to-playback-stop acknowledgements, delegation
-and task completion. Client and server clocks must not be subtracted without
-clock alignment. Track queue depth, underruns, audio drops, CPU and RSS separately.
-CPU/RSS are process measures unless experimentally attributed to sessions.
-There are no measured latency benchmarks or full-duplex results yet.
+The gateway counts active sockets. Voice telemetry records media timing and
+drops, and the mock socket soak reports connections, frames, reconnects and
+process-level resources. Each measurement uses its own clock. Physical
+microphone-to-speaker latency and provider cost require separate evidence.
+See [telemetry](voice-telemetry.md) and [release qualification](roadmap/delivery/release.md).

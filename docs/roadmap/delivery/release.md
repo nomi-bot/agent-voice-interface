@@ -12,3 +12,40 @@
 | Portability | Include browser and headless parity on the same build plus the two-way ROS mock action evidence from JEV-31. |
 
 **Report contract.** Each row records command, SHA, dependency versions, start/end, sample count, environment, result, evidence and limitations. Record measurement clock and any skipped or unavailable path. Keep operator-supplied keys out of artifacts. Publish a reproducible local quickstart, supported capability matrix, limitations, and instructions to disable Live or durable submissions while retaining access to existing runs. Explicitly list any missed provisional target with evidence and a proposed disposition for Jeven. Only update roadmap exit status after the corresponding evidence exists.
+
+### Headless mock socket stability
+
+From a Linux or macOS source checkout with Python 3.12+ and the default
+package dependencies, run the following command. Redirect the report outside
+the checkout to keep the measured revision clean.
+
+```bash
+PYTHONPATH=src python scripts/mock_socket_soak.py > /tmp/avi-socket-soak.json
+```
+
+The runner launches its own loopback-only Uvicorn process on an ephemeral
+port, using the mock PCM mirror with no credentials. Two independent Python
+SDK clients send distinct synthetic 20 ms frames, verify every returned
+payload, direction, sequence and timestamp, and reopen their sockets every
+60 seconds. A missing frame, invalid mirror or failed reconnection fails the
+run. The JSON contains per-client counts, process CPU, peak memory, versions
+and revision. For a quick preflight use `--seconds 5 --reconnect-seconds 2`.
+Only the full 1800-second load qualifies the mock socket stability row.
+Browser audio, real provider latency, barge-in and task execution each need
+their own evidence.
+
+### Chromium synthetic-device acceptance
+
+To exercise the rendered page with an actual Chromium engine, free loopback
+port 8000, install Python Playwright in the AVI test environment, and point
+`AVI_TEST_CHROMIUM` at a matching Chromium executable. Run from the checkout:
+
+```bash
+AVI_TEST_CHROMIUM=/path/to/chromium PYTHONPATH=src python tests/test_chromium_qualification.py -v
+```
+
+The temporary gateway seeds a retained synthetic result. The browser finds
+the run, reads the result and replays events, then uses a fake media device
+through the page's microphone, AudioWorklet, mock mirror and WebAudio path.
+It verifies uplink continues after local playback stops and ends the session.
+The synthetic media check measures scheduled playback only.

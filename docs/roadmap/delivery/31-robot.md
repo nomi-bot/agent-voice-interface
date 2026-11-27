@@ -2,6 +2,8 @@
 
 [Linear issue](https://linear.app/jevenzzh/issue/JEV-31) · [ADR-010](../../adr/010-robot-client-integration.md). Three contributors can work concurrently on SDK parity vectors, a headless device scenario, and a ROS 2 bridge with a fake bus. The issue integrator owns their shared mock device event fixture and one integration PR.
 
+The [simulator guide](../../../clients/robot/README.md) gives the finite workload and the optional ROS 2 graph check.
+
 **SDK and simulator.** Reuse src/avip_client and connect to the same /ws/avip route as the browser. Drive timestamped 16 kHz PCM from a deterministic mock mic, consume audio on a bounded fake speaker and expose stop/interruption, reconnect and authorized task-result lookup. Negotiate only supported capabilities. Provide one documented CLI invocation for a finite session with deterministic exit status. Include selectable disconnect and slow-speaker scenarios with frame/drop counts. No robot label or ROS dependency in core.
 
 **Mock device contract.** Supply one synthetic sensor observation and one named, harmless in-memory mock action. Device checks negotiated capability, local allowlist and local authorization before admission. Correlate request and outcome by event ID. Demonstrate accepted → running → completed and denial/timeout, duplicate request handling, and explicit cancel if supported. Specify the bounded payload and timeout in the fixture. If a new AVIP capability is needed, land its negotiated schema and browser/headless conformance vectors before claiming wire support.

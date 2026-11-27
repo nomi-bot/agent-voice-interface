@@ -1,0 +1,40 @@
+name: Hermes loopback qualification
+on:
+  workflow_dispatch:
+  pull_request:
+    types: [opened, reopened, synchronize, labeled]
+
+permissions:
+  contents: read
+
+jobs:
+  pinned-hermes:
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'hermes-loopback')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Prepare AVI and locked Hermes environments
+        run: |
+          python -m venv "$RUNNER_TEMP/avi-venv"
+          "$RUNNER_TEMP/avi-venv/bin/pip" install -e '.[dev,hermes]'
+          python -m pip install uv==0.13.9
+          git init --quiet "$RUNNER_TEMP/hermes"
+          git -C "$RUNNER_TEMP/hermes" fetch --depth=1 --no-tags https://github.com/NousResearch/hermes-agent.git 0f602c5f6f18615632535251d62a2db74ce93b69
+          git -C "$RUNNER_TEMP/hermes" checkout --detach FETCH_HEAD
+          uv sync --project "$RUNNER_TEMP/hermes" --python 3.14.10 --locked --extra messaging --no-dev
+      - name: Check real AVIP to Hermes recovery
+        run: |
+          PYTHONPATH=src "$RUNNER_TEMP/hermes/.venv/bin/python" docs/roadmap/delivery/evidence/probe_hermes_avip.py \
+            --checkout "$RUNNER_TEMP/hermes" --avi-python "$RUNNER_TEMP/avi-venv/bin/python" | tee "$RUNNER_TEMP/hermes-avip-evidence.json"
+        shell: bash
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hermes-avip-evidence
+          path: ${{ runner.temp }}/hermes-avip-evidence.json
+          if-no-files-found: error

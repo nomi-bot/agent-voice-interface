@@ -312,14 +312,14 @@ class VoiceTelemetry:
         self,
         *,
         client: str,
-        path: str = "mock-mirror",
+        path: str = "unknown",
         scenario: str,
         now: Callable[[], float] | None = None,
         wall_now: Callable[[], float] | None = None,
         sample_cap: int = SAMPLE_CAP,
     ):
         self.client = client if client in _CLIENTS else "unknown"
-        self.path = path if path in _PATHS else "mock-mirror"
+        self.path = path if path in _PATHS else "unknown"
         self.scenario = scenario if isinstance(scenario, str) and _TOKEN.fullmatch(scenario) else "unknown"
         self._now = now if now is not None else (lambda: time.monotonic() * 1000.0)
         self._wall = wall_now if wall_now is not None else (lambda: time.time() * 1000.0)
@@ -328,6 +328,7 @@ class VoiceTelemetry:
         self.marks: dict[str, float] = {}
         self.counters = {name: 0 for name in COUNTERS}
         self.cost = {name: None for name in COST_FIELDS}
+        self.latest_provider_usage = False
         self.timeouts: list[dict] = []
         self.session_id: str | None = None
         self._depth: float | None = None
@@ -374,7 +375,8 @@ class VoiceTelemetry:
                 self.counters[name] = parsed
 
     def note_uplink(self, session_ms: float | None = None) -> None:
-        self._uplink_at.append(self._at(session_ms))
+        if self.path == "mock-mirror":
+            self._uplink_at.append(self._at(session_ms))
 
     def note_downlink(self, session_ms: float | None = None) -> None:
         """Pair this downlink with the next unpaired uplink, if there is one."""
@@ -382,6 +384,8 @@ class VoiceTelemetry:
         if self._last_downlink is not None:
             self.jitter.record(abs(at - self._last_downlink - NOMINAL_FRAME_MS))
         self._last_downlink = at
+        if self.path != "mock-mirror":
+            return
         if self._pair < len(self._uplink_at):
             sent = self._uplink_at[self._pair]
             self._pair += 1
@@ -436,7 +440,7 @@ class VoiceTelemetry:
         if len(self.timeouts) < 32:
             self.timeouts.append({"kind": token, "sessionMs": self.now()})
 
-    def note_cost(self, fields: Mapping[str, object]) -> None:
+    def note_cost(self, fields: Mapping[str, object], *, latest_provider_usage: bool = False) -> None:
         """Merge provider usage. Credential-shaped keys or values are refused.
 
         A refused update leaves the previous cost fields unchanged. The mock
@@ -469,17 +473,18 @@ class VoiceTelemetry:
                 return
             cleaned[key] = value
         self.cost.update(cleaned)
+        self.latest_provider_usage = latest_provider_usage
 
     def report(self) -> dict:
         """Return a JSON-ready snapshot. Strings that look like secrets are redacted."""
         marks = {name: {"sessionMs": self.marks[name]} for name in MARKS if name in self.marks}
         intervals = {}
         for label, start, end in _INTERVALS:
-            if start in self.marks and end in self.marks:
+            paired = label in {"uplinkToDownlink", "uplinkToAudible", "downlinkToAudible"}
+            if (not paired or self.path == "mock-mirror") and start in self.marks and end in self.marks:
                 intervals[label] = self.marks[end] - self.marks[start]
             else:
                 intervals[label] = None
-        e2e_scope = "provider" if self.path == "provider" else "mock-mirror"
         payload = {
             "schema": SCHEMA,
             "path": self.path,
@@ -521,7 +526,9 @@ class VoiceTelemetry:
                 "sinkConsumed": self._sink_consumed,
             },
             "e2e": {
-                "scope": e2e_scope,
+                "scope": self.path,
+                "method": "mock-frame-pair" if self.path == "mock-mirror" else "unmeasured",
+                "playbackObservation": "schedule-only",
                 "unit": "ms",
                 "clock": "session",
                 "uplinkToDownlink": self.e2e.snapshot(),
@@ -530,6 +537,8 @@ class VoiceTelemetry:
             "cost": dict(self.cost),
             "timeouts": list(self.timeouts),
         }
+        if self.latest_provider_usage:
+            payload["costScope"] = "latest-provider-usage-snapshot"
         return _scrub(payload)
 
     def _at(self, session_ms: float | None) -> float:
@@ -619,12 +628,17 @@ async def probe_mock_mirror(url: str, *, frames: int = 2) -> dict:
         capabilities={
             "audio_input": True,
             "audio_output": True,
+            "voice_path_report": True,
             "camera": False,
             "display": False,
             "robot_actions": False,
         },
     ) as client:
         ready = await client.start()
+        if not (ready.get("protocol") == "avip/1" and ready.get("request_id") == "req-telemetry-probe"
+                and ready.get("voice_path") == "mock-mirror"
+                and ready.get("capabilities", {}).get("voice_path_report") is True):
+            raise RuntimeError("Mock probe requires a gateway-confirmed mirror")
         telemetry.set_session_id(ready.get("session_id"))
         telemetry.mark("session-start")
         for _ in range(frames):

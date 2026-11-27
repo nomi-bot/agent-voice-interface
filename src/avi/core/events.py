@@ -6,3 +6,4 @@ from typing import Any, Literal
 class VoiceEvent:
     kind: Literal["audio", "interrupted", "tool_call", "turn_complete", "error"]
     payload: bytes | dict[str, Any] | None = None
+    response_id: int | None = None

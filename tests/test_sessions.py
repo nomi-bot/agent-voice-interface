@@ -310,7 +310,14 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app), base_url="http://localhost"
         ) as client:
-            self.assertEqual((await client.get("/health")).json()["voice"], "not_implemented")
+            from avi.providers.mount import resolve_voice_mount
+            body = (await client.get("/health")).json()
+            mount = resolve_voice_mount()
+            self.assertEqual(body["status"], "ok")
+            self.assertEqual(body["voice"], mount.mode)
+            self.assertEqual(body["voice_reason"], mount.reason)
+            self.assertEqual(body["agent"], "mock")
+            self.assertNotIn("GEMINI_API_KEY", json.dumps(body))
 
     async def test_isolation_errors_and_cleanup(self):
         async with app.router.lifespan_context(app):

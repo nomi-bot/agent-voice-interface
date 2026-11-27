@@ -25,9 +25,42 @@ The [replay fixture](../../../tests/fixtures/jev29-voice-delegation-v1.json) is 
 
 The journal binds each provider call to its stable request ID before dispatch and records the AVI run ID when admission returns. It stores IDs, a payload digest and reply state. An `attempted` reply may have reached the provider even when the SDK write fails. `acknowledged` means the SDK accepted the write. Audible speech is measured separately. A repeated call in the same session never sends a second reply after an attempt. A fresh authenticated status query may speak a retained result a caller already heard if a previous session ended before they observed its outcome.
 
-### Integration gates
+### Gateway integration and remaining acceptance
 
-- Wire the router into the reviewed Live gateway after #13 and the authorized durable service are available on `dev`. Route the model's tool-call expiry event before generic provider-error handling. Register the negotiated JEV-28 operations and keep media-only sessions on the existing path.
-- Send one structured reply per Gemini call. Use a new status-query turn for the eventual result. This path works with the scripted provider and a fresh authenticated session holding the AVI run ID. Extended Gemini follow-up over an already acknowledged call remains unverified.
-- A disconnected reply after admission preserves the recorded run binding. A process exit between run admission and journal binding can leave only the stable request ID. The current durable API retrieves by run ID, so recovery when the caller has no receipt needs a reviewed owner-scoped lookup or equivalent recovery contract. The router leaves the run in the durable service and issues no fresh submission for recovery.
-- Keep the journal private to the server and align its retention with the durable retry window when wiring the gateway. Run a real Gemini microphone utterance through the selected Hermes deployment, including one denial and one upstream failure. Record provider reply and audible result separately.
+The opt-in gateway binds a distinct durable control channel to each AVIP socket. Live declares the two Hermes tools only after that client negotiates durable controls. The provider may emit calls before authentication. The journal preserves each call's original grant and rejects unauthorized calls without dispatch, including after a later authentication on the same socket. The default media-only gateway keeps the acknowledgement tool. Provider expiry detaches the expired call's reply. Playback interruption leaves admitted runs active.
+
+A new authenticated turn can query the result by AVI run ID. The service's owner-scoped admitted-request lookup recovers missing journal bindings after a crash without submitting a task. A closed socket's private journal rows expire after the retry window. Single-process startup marks abandoned sockets closed before admitting new ones.
+
+The ASGI integration test uses a scripted provider and a deterministic backend. It covers an allowed delegation, policy denial, late authentication, provider tool expiry, interruption, a fresh-session result and cross-owner isolation. Run it with `python -m unittest discover -s tests -p test_voice_gateway_delegation.py -v`. Live Gemini and Hermes plus the real mic/speaker acceptance still require a separately recorded run. Measure provider reply acceptance and audible result separately.
+
+### Operator-run prerecorded speech qualification
+
+Use two operator-supplied synthetic **mono, 16 kHz, signed 16-bit PCM WAV** files (up to 30 seconds each). In the first, ask Gemini to delegate the exact approved read-only query to the agent, verbatim. In the second, ask it to look up the retained result of the task it just submitted using its run ID and speak the result. Use a synthetic task with a recognizable answer for later listening. Keep the exact query text in a local UTF-8 file with at most a trailing newline. Speech recognition or model paraphrasing can change the submitted text and trigger the launcher's exact-match denial. Inspect the fixture or wording before any new attempt.
+
+Install the Live and Hermes extras and run the project's pinned Hermes API server with its isolated, tool-disabled profile. Use a fresh private state directory for this test. In the gateway environment configure `HERMES_API_KEY`, `GEMINI_API_KEY` and the operator-selected `GEMINI_LIVE_MODEL`. Start the local gateway with a backend scope that identifies this origin, profile and credential epoch.
+
+```sh
+python -m avi.local_gateway --state-dir "$AVI_STATE" --hermes-origin "$HERMES_ORIGIN" \
+  --backend-scope "$AVI_BACKEND_SCOPE" --owner speech-qualification \
+  --allow-query "$(cat "$APPROVED_QUERY_FILE")"
+```
+
+From the repository root the following command opens one live, potentially billable voice session. It uses the launcher's private grant on numeric loopback and the two WAVs as paced audio input. It never generates a text submission or retries a voice turn. The optional `--review-wav` creates a new owner-only WAV containing downlink audio received from the start of the follow-up turn. Omit that option to discard audio. Keep this recording private.
+
+```sh
+python docs/roadmap/delivery/evidence/probe_spoken_delegation.py --live \
+  --state-dir "$AVI_STATE" --query-file "$APPROVED_QUERY_FILE" \
+  --command-wav "$SYNTHETIC_COMMAND_WAV" --followup-wav "$SYNTHETIC_FOLLOWUP_WAV" \
+  --review-wav "$NEW_PRIVATE_REVIEW_WAV"
+```
+
+The default invocation prints a skip without connecting. Missing fixtures or local grant also skip. Once attempted, an incomplete run exits nonzero, including the 150-second deadline. A timeout after submission can leave a running task. Inspect the owner’s recent runs before considering a separate attempt.
+
+| Report observation | Interpretation |
+| --- | --- |
+| Exactly one session-bound submission with the approved task digest, accepted backend handle, completed state and retained nonempty result | The configured backend reported completion for this session's approved task. This evidence cannot establish how often the upstream model internally executed. |
+| Delegation and result-read replies acknowledged | The provider SDK accepted replies correlated to this session and run. The report omits prompts, results, run IDs, provider handles, grants and model text. |
+| Positive PCM bytes observed after the journal showed the result-read acknowledgement | The client received downlink PCM after that observation. A short answer that finished before the poll observed acknowledgement can yield an incomplete report. |
+| Human spoken accuracy | Initially `unreviewed`. Listen to the private follow-up WAV, compare it to the expected synthetic answer, and separately record correct, incorrect or indeterminate. Keep task content and recordings out of the shared report. |
+
+This probe covers the positive, credentialed transport path. Denied tasks, upstream failures, acoustic playback latency and physical devices have separate acceptance gates. To validate the probe offline, run `python -m unittest discover -s tests -p test_spoken_qualification.py -v`.

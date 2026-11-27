@@ -1,0 +1,23 @@
+{
+    "clock": "backend process monotonic",
+    "completed_results": 1,
+    "finished": "2026-11-27T18:13:34.764435+00:00",
+    "flushed_synthetic_frames": 1,
+    "foreign_owner_denials": 1,
+    "interruptions": 1,
+    "kind": "real-loopback-websocket/scripted-provider/timed-backend",
+    "primary_dispatches": 1,
+    "python": "3.12.14",
+    "remote_provider_calls": 0,
+    "replayed_events": 2,
+    "result": "passed",
+    "result_audio_frames_played": 1,
+    "separate_confirmed_cancellations": 1,
+    "sha": "ffe16834211a22bfd40ea978e892c2b34c1d843f",
+    "started": "2026-11-27T18:12:32.516893+00:00",
+    "status_polls_after_reconnect": 32,
+    "task_runtime_seconds": 61.258,
+    "uvicorn": "0.54.0",
+    "websocket_sessions": 3,
+    "websockets": "17.4"
+}

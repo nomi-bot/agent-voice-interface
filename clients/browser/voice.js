@@ -46,6 +46,7 @@ export const MAX_UPLINK_QUEUED_BYTES = MAX_BUFFER_FRAMES * UPLINK_FRAME_BYTES;
 // A queue already twice that deep is not a live mic anymore. Close it.
 export const UPLINK_CLOSE_QUEUED_BYTES = MAX_UPLINK_QUEUED_BYTES * 2;
 const NOMINAL_FRAME_SEC = FRAME_SAMPLES / SAMPLE_RATE_HZ;
+const PLAYBACK_CLOCK_EPSILON_SEC = 1e-9;
 const SECURE_HOSTS = new Set(["localhost", "127.0.0.1", "::1", "[::1]"]);
 
 const MIC_CONSTRAINTS = {
@@ -73,6 +74,20 @@ export function uplinkQueueDecision(bufferedAmount, frameBytes = UPLINK_FRAME_BY
   if (bufferedAmount >= UPLINK_CLOSE_QUEUED_BYTES) return "close";
   if (bufferedAmount + frameBytes > MAX_UPLINK_QUEUED_BYTES) return "drop";
   return "send";
+}
+
+// Flush scheduled audio for one AVIP generation. A later generation is left
+// playing. Local stopPlayback is separate: it also sets playbackHalted.
+export function applyPlaybackInterruption(speaker, generation, message) {
+  if (!message || message.protocol !== "avip/1" || message.type !== "response.interrupted") {
+    return {generation, flushed: false};
+  }
+  if (!Number.isInteger(message.generation) || message.generation < 0) {
+    return {generation, flushed: false};
+  }
+  if (message.generation !== generation) return {generation, flushed: false};
+  if (speaker) speaker.stop();
+  return {generation: generation + 1, flushed: true};
 }
 
 // AVIP version 1 downlink is 16 kHz. Passing any other rate throws instead of
@@ -147,26 +162,29 @@ export function browserMedia() {
 }
 
 export class SpeakerBuffer {
-  // Schedules payload bytes through `play`. Drops a new frame when the
-  // scheduled horizon is already MAX_BUFFER_FRAMES nominal chunks ahead.
-  // That matches the gateway MediaDelivery depth. stop() cancels every
-  // local handle and does not call back into a socket.
+  // Schedules payload bytes through `play`. The time horizon and source
+  // count both limit the queue. By default it holds eight queued sources
+  // plus the source currently playing.
+  // stop() cancels local handles without calling back into the socket.
   constructor({now, play, depth = MAX_BUFFER_FRAMES}) {
     if (typeof now !== "function" || typeof play !== "function") throw new Error("invalid_audio");
     this.now = now;
     this.play = play;
     this.depth = depth;
     this.handles = [];
+    this._sourceEnds = new WeakMap();
     this.nextTime = 0;
     this.played = 0;
     this.dropped = 0;
   }
 
   enqueue(payload) {
-    this.handles = this.handles.filter((handle) => !handle.ended);
     const start = this.now();
+    // An elapsed source no longer reserves playback even if onended is delayed.
+    const cutoff = start + PLAYBACK_CLOCK_EPSILON_SEC;
+    this.handles = this.handles.filter((handle) => !handle.ended && this._sourceEnds.get(handle) > cutoff);
     if (this.nextTime < start) this.nextTime = start;
-    if (this.nextTime - start >= this.depth * NOMINAL_FRAME_SEC) {
+    if (this.handles.length >= this.depth + 1 || this.nextTime - start >= this.depth * NOMINAL_FRAME_SEC) {
       this.dropped += 1;
       return false;
     }
@@ -174,6 +192,7 @@ export class SpeakerBuffer {
     this.handles.push(handle);
     const samples = payload.length / 2;
     this.nextTime += samples / SAMPLE_RATE_HZ;
+    this._sourceEnds.set(handle, this.nextTime);
     this.played += 1;
     return true;
   }
@@ -335,7 +354,7 @@ export class BrowserVoice {
     media = browserMedia(),
     audio = createBrowserAudio(),
     downlinkRateHz = SAMPLE_RATE_HZ,
-    path = "mock-mirror",
+    path = "unknown",
   } = {}) {
     this.now = now;
     this.onMetric = onMetric;
@@ -368,9 +387,12 @@ export class BrowserVoice {
     this.running = false;
     this.captureLive = false;
     this.playbackHalted = false;
+    this.playbackGeneration = 0;
+    this.activeResponseId = null;
     this._closing = false;
     this._shutdownDone = false;
     this._reader = null;
+    this._shutdownTask = null;
   }
 
   _mark(name) {
@@ -415,17 +437,21 @@ export class BrowserVoice {
   }
 
   async _shutdown(status, detail) {
-    if (this._shutdownDone) return;
+    if (this._shutdownTask) return this._shutdownTask;
     this._shutdownDone = true;
     this._closing = true;
     this.running = false;
     this.playbackHalted = true;
     this._releaseStream();
+    this.chunker.reset();
     if (this.speaker) this.speaker.stop();
     this.speaker = null;
-    await this.audio.close();
-    if (status) this.onStatus(status, detail || {});
     this._closeClient();
+    this._shutdownTask = (async () => {
+      await this.audio.close();
+      if (status) this.onStatus(status, detail || {});
+    })();
+    return this._shutdownTask;
   }
 
   _adopt(client) {
@@ -440,6 +466,10 @@ export class BrowserVoice {
       }
     }
     this.client = client;
+    if (this._shutdownDone) {
+      this._closeClient();
+      throw voiceError("session_closed", "Voice session was closed.");
+    }
   }
 
   _closeClient() {
@@ -475,6 +505,7 @@ export class BrowserVoice {
     try {
       stream = await this.media.getUserMedia(MIC_CONSTRAINTS);
     } catch (error) {
+      if (this._shutdownDone) throw error;
       await this.audio.close();
       if (error && error.name === "SecurityError") {
         this.onStatus("insecure-origin", {message: error.message});
@@ -492,15 +523,18 @@ export class BrowserVoice {
       this.onStatus("capture-failed", {message: error && error.message, name: error && error.name});
       throw error;
     }
+    this.stream = stream;
+    if (this._shutdownDone) {
+      this._releaseStream();
+      throw voiceError("session_closed", "Voice session was closed.");
+    }
     const tracks = stream.getAudioTracks();
     if (!tracks.length) {
-      this.stream = stream;
       this._releaseStream();
       await this.audio.close();
       this.onStatus("device-ended", {message: "No microphone track was opened."});
       throw voiceError("device_ended", "No microphone track was opened.");
     }
-    this.stream = stream;
     const track = tracks[0];
     track.addEventListener("ended", () => {
       if (this._closing || !this.captureLive) return;
@@ -513,6 +547,7 @@ export class BrowserVoice {
     try {
       const opened = await connect(lease);
       if (opened && opened.client) this._adopt(opened.client);
+      if (this._shutdownDone) throw voiceError("session_closed", "Voice session was closed.");
       if (!this.client) throw voiceError("invalid_state", "connect returned no client");
       if (!this.captureLive) {
         throw voiceError("device_ended", "The microphone ended before the session was ready.");
@@ -521,22 +556,33 @@ export class BrowserVoice {
       if (!capabilities || !capabilities.audio_input || !capabilities.audio_output) {
         throw voiceError(
           "audio_unavailable",
-          "The gateway did not negotiate audio. Start it with AVIP_MOCK_MEDIA=1.",
+          "The gateway did not negotiate audio. Set GEMINI_API_KEY and GEMINI_LIVE_MODEL, or start it with AVIP_MOCK_MEDIA=1.",
         );
       }
       if (capabilities.robot_actions) {
         throw voiceError("invalid_state", "This voice client does not enable robot actions.");
       }
+      if (this.client.capabilities?.voice_path_report === true) {
+        this.telemetry.path = this.client.voicePath ?? "unknown";
+      }
+      this.telemetry.setSessionId(opened.ready.session_id);
       const audio = await this.audio.open({
         stream: this.stream,
         onSamples: (samples, sampleRate) => this._onSamples(samples, sampleRate),
       });
       this.speaker = audio.speaker;
+      if (this._shutdownDone) throw voiceError("session_closed", "Voice session was closed.");
     } catch (error) {
-      this.captureLive = false;
       this._releaseStream();
-      await this.audio.close();
+      if (this.speaker) this.speaker.stop();
+      this.speaker = null;
       this._closeClient();
+      await this.audio.close();
+      if (this._shutdownDone) throw error;
+      if (error?.code === "startup_timeout") {
+        this.telemetry.noteTimeout("startup");
+        this._touchStats();
+      }
       if (error && error.code === "audio_unavailable") {
         this.onStatus("audio-unavailable", {message: error.message});
       } else if (error && error.code === "device_ended") {
@@ -656,10 +702,10 @@ export class BrowserVoice {
       this.telemetry.noteBufferDepth(this.speaker.depthFrames());
     }
     if (played) {
-      const heard = this.now();
+      const scheduledAt = this.now();
       this.stats.playbackFrames += 1;
-      this._markAt("playback-start", heard);
-      this.telemetry.noteAudible(heard);
+      this._markAt("playback-start", scheduledAt);
+      this.telemetry.noteAudible(scheduledAt);
     } else {
       this.stats.playbackDrops += 1;
     }
@@ -673,26 +719,56 @@ export class BrowserVoice {
         message = await this.client.nextFrame();
       } catch (error) {
         if (this._shutdownDone || !this.running) return;
+        const message = error && error.message ? String(error.message) : "";
+        if (message === "queue_full" || message.startsWith("queue_full:")) {
+          this.telemetry.noteQueueFull();
+          this._touchStats();
+        }
         if (this.client.state !== "closed") {
-          const message = error && error.message ? String(error.message) : "";
-          if (message === "queue_full" || message.startsWith("queue_full:")) {
-            this.telemetry.noteQueueFull();
-            this._touchStats();
-          }
-          this.onStatus("avip-error", {message: error.message});
+          this.onStatus("avip-error", {message});
           continue;
         }
-        await this._shutdown("disconnected", {message: error.message});
+        await this._shutdown("disconnected", {message});
         return;
       }
       if (!this.running) return;
       try {
+        if (this.client.responseCancel && message?.protocol === "avip/1"
+            && Number.isSafeInteger(message.response_id) && message.response_id >= 0) {
+          if (message.type === "response.started") {
+            this.activeResponseId = message.response_id;
+            this._touchStats();
+            continue;
+          }
+          if (message.type === "response.ended" && message.response_id === this.activeResponseId) {
+            this.activeResponseId = null;
+            this._touchStats();
+            continue;
+          }
+        }
+        if (message && message.type === "response.interrupted") {
+          const applied = applyPlaybackInterruption(
+            this.speaker, this.playbackGeneration, message,
+          );
+          this.playbackGeneration = applied.generation;
+          if (applied.flushed) {
+            this.onStatus("playback-interrupted", {generation: message.generation});
+          }
+          continue;
+        }
         if (message && message.direction === AUDIO_DOWNLINK && message.payload) this._onDownlink(message.payload);
       } catch (error) {
         this.stopPlayback();
         this.onStatus("playback-failed", {message: error.message});
       }
     }
+  }
+
+  cancelResponse() {
+    if (!this.running || this.activeResponseId === null) return;
+    this.client.cancelResponse(this.activeResponseId);
+    this.activeResponseId = null;
+    this._touchStats();
   }
 
   stopPlayback() {

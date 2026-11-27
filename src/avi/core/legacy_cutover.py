@@ -4,7 +4,7 @@ import asyncio
 from math import isfinite
 from uuid import uuid4
 
-from avi.agents.base import AgentAdapter, Run
+from avi.agents.base import AgentAdapter, Run, SubmissionRejected
 from avi.core.durable_store import AdmissionsClosed, LegacyOutcome, SQLiteRunStore
 
 
@@ -20,12 +20,10 @@ class LegacyCutover:
             raise ValueError("Operation timeout must be positive and finite")
         self._store = store
         self._operation_timeout = operation_timeout
-        self._accepting_legacy = True
+        self._accepting_legacy = not store.legacy_frozen()
         self._durable_enabled = False
         self._submitting = 0
-        self._unconfirmed_submission = False
         self._running: dict[tuple[str, str], AgentAdapter] = {}
-        self._outcomes: dict[tuple[str, str], LegacyOutcome] = {}
         self._switch = asyncio.Lock()
 
     @property
@@ -38,6 +36,7 @@ class LegacyCutover:
 
     def begin(self) -> None:
         """Leave existing legacy sessions in place and close their admission gate."""
+        self._store.freeze_legacy()
         self._accepting_legacy = False
 
     async def enable_durable(self, *, cancel: bool = False) -> None:
@@ -45,15 +44,32 @@ class LegacyCutover:
         async with self._switch:
             if self._durable_enabled:
                 return
-            if self._accepting_legacy or self._submitting or self._unconfirmed_submission:
+            if self._accepting_legacy or self._submitting:
                 raise CutoverBlocked("Legacy admissions or submissions are unresolved")
             for (session_id, run_id), adapter in tuple(self._running.items()):
                 await self._inspect(session_id, run_id, adapter, cancel=cancel)
-            if self._running:
+            if await asyncio.to_thread(self._store.unresolved_legacy):
                 raise CutoverBlocked("Legacy work has an unconfirmed terminal outcome")
-            await asyncio.to_thread(self._store.record_legacy_cutover, tuple(self._outcomes.values()))
-            self._outcomes.clear()
             self._durable_enabled = True
+
+    async def reconcile_known_run(
+        self, session_id: str, run_id: str, original_adapter: AgentAdapter,
+    ) -> bool:
+        """Trusted operator hook: read terminal evidence using the original legacy scope."""
+        async with self._switch:
+            unresolved = await asyncio.to_thread(self._store.unresolved_legacy)
+            if not any((owner, handle) == (session_id, run_id) for _, owner, handle in unresolved):
+                return False
+            if not original_adapter.capabilities.status:
+                return False
+            async with asyncio.timeout(self._operation_timeout):
+                observed = await original_adapter.status(run_id)
+            if observed.id != run_id or observed.status not in {"completed", "failed", "cancelled"}:
+                return False
+            outcome = LegacyOutcome(session_id, run_id, observed.status)
+            await asyncio.to_thread(self._store.settle_legacy, outcome)
+            self._running.pop((session_id, run_id), None)
+            return True
 
     async def rollback(self) -> None:
         """Disable durable admissions and leave the old admission gate frozen."""
@@ -65,25 +81,25 @@ class LegacyCutover:
             raise AdmissionsClosed("Legacy submissions are disabled")
         self._submitting += 1
         try:
-            run = await adapter.submit(request)
-        except ValueError:
-            # The legacy mock raises this only for pre-admission rejection.
-            raise
-        except (Exception, asyncio.CancelledError):
-            self._unconfirmed_submission = True
-            raise
+            ticket = await asyncio.to_thread(self._store.reserve_legacy, session_id)
+            try:
+                run = await adapter.submit(request)
+            except SubmissionRejected:
+                await asyncio.to_thread(self._store.discard_rejected_legacy, ticket)
+                raise
+            await asyncio.to_thread(self._store.bind_legacy, ticket, run.id)
+            self._running[(session_id, run.id)] = adapter
+            await self._observe(session_id, run)
+            return run
         finally:
             self._submitting -= 1
-        self._running[(session_id, run.id)] = adapter
-        self._observe(session_id, run)
-        return run
 
-    def _observe(self, session_id: str, run: Run) -> None:
+    async def _observe(self, session_id: str, run: Run) -> None:
         key = (session_id, run.id)
         if run.status in {"completed", "failed", "cancelled"} and key in self._running:
-            self._running.pop(key)
-            if not self._accepting_legacy:
-                self._outcomes[key] = LegacyOutcome(session_id, run.id, run.status)
+            outcome = LegacyOutcome(session_id, run.id, run.status)
+            await asyncio.to_thread(self._store.settle_legacy, outcome)
+            self._running.pop(key, None)
 
     async def _inspect(
         self, session_id: str, run_id: str, adapter: AgentAdapter, *, cancel: bool = False,
@@ -100,7 +116,7 @@ class LegacyCutover:
         except Exception:
             return
         if run.id == run_id:
-            self._observe(session_id, run)
+            await self._observe(session_id, run)
 
     async def _close(self, session_id: str, adapter: AgentAdapter) -> None:
         # The original adapter still owns and performs its disconnect cleanup.
@@ -122,12 +138,12 @@ class _TrackedLegacyAdapter:
 
     async def status(self, run_id: str) -> Run:
         run = await self._adapter.status(run_id)
-        self._cutover._observe(self._session_id, run)
+        await self._cutover._observe(self._session_id, run)
         return run
 
     async def cancel(self, run_id: str) -> Run:
         run = await self._adapter.cancel(run_id)
-        self._cutover._observe(self._session_id, run)
+        await self._cutover._observe(self._session_id, run)
         return run
 
     async def close(self) -> None:

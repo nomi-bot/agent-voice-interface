@@ -1,6 +1,7 @@
 import asyncio
 import copy
 import json
+import os
 from pathlib import Path
 import unittest
 from contextlib import asynccontextmanager
@@ -82,12 +83,38 @@ async def send_frame(incoming, text=None, data=None):
 
 
 class AvipWebSocketTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        super().setUp()
+        # Ambient Live credentials or the mock flag must not override the
+        # patched capability fixtures in this class.
+        self._voice_env = patch.dict(
+            os.environ,
+            {
+                "GEMINI_API_KEY": "",
+                "GEMINI_LIVE_MODEL": "",
+                "AVIP_MOCK_MEDIA": "",
+            },
+            clear=False,
+        )
+        self._voice_env.start()
+        self.addCleanup(self._voice_env.stop)
+
     def test_session_ids_are_opaque_and_gateway_capabilities_stay_disabled(self):
         from avi.main import development_capabilities
+        audio = avip.Capabilities(audio_input=True, audio_output=True)
         self.assertEqual(AVIP_CAPABILITIES, avip.Capabilities())
+        self.assertEqual(development_capabilities({}), avip.Capabilities())
+        self.assertEqual(development_capabilities({"AVIP_MOCK_MEDIA": "1"}), audio)
         self.assertEqual(
-            development_capabilities({"AVIP_MOCK_MEDIA": "1"}),
-            avip.Capabilities(audio_input=True, audio_output=True),
+            development_capabilities({
+                "GEMINI_API_KEY": "present",
+                "GEMINI_LIVE_MODEL": "operator-selected-model",
+            }),
+            audio,
+        )
+        self.assertEqual(
+            development_capabilities({"GEMINI_API_KEY": "present"}),
+            avip.Capabilities(),
         )
         for value in ("", "true", "yes", "0"):
             self.assertEqual(
@@ -188,6 +215,7 @@ class AvipWebSocketTests(unittest.IsolatedAsyncioTestCase):
     async def test_non_json_and_binary_frames_are_discarded(self):
         frames = (
             ("text", TOKEN, None, 1002, "Protocol error"),
+            ("text", '{"type":NaN}', None, 1002, "Protocol error"),
             ("bytes", None, b"\xff" + TOKEN.encode(), 1003, "Unsupported data"),
         )
         async with app.router.lifespan_context(app):

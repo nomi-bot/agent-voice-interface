@@ -23,6 +23,8 @@ const UINT32_MAX = 0xffffffff;
 const UINT64_MAX = 0xffffffffffffffffn;
 const ENVELOPE_KEYS = ["protocol", "type", "request_id", "session_id", "device_id", "capabilities"];
 const CAPABILITY_KEYS = ["audio_input", "audio_output", "camera", "display", "robot_actions"];
+const DURABLE_ORIGIN = "http://127.0.0.1:8000";
+const DURABLE_SOCKET = "ws://127.0.0.1:8000/ws/avip";
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 
 function fail(code, field) {
@@ -196,7 +198,7 @@ export class AvipBrowserClient {
     this.socket.addEventListener("close", () => {
       this._fail(new Error("socket closed"));
     });
-    return new Promise((resolve, reject) => {
+    return this._withStartupDeadline(new Promise((resolve, reject) => {
       let settled = false;
       this._rejectConnect = (error) => {
         if (settled) return;
@@ -214,7 +216,23 @@ export class AvipBrowserClient {
         this.state = "open";
         resolve();
       });
-    });
+    }), "connection");
+  }
+
+  // Bound both waits that can otherwise leave a live microphone attached to a
+  // silent gateway. Normal silence after session.ready has no client deadline.
+  async _withStartupDeadline(pending, phase) {
+    const timer = setTimeout(() => {
+      const error = new Error(`AVIP ${phase} timed out. Start a new session to retry.`);
+      error.code = "startup_timeout";
+      this._fail(error);
+      this._closeSocket();
+    }, 15_000);
+    try {
+      return await pending;
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   async start() {
@@ -230,10 +248,120 @@ export class AvipBrowserClient {
       capabilities: this.capabilities,
     });
     this.socket.send(text);
-    const message = await this._nextJson();
+    const message = await this._withStartupDeadline(this._nextJson(), "handshake");
     if (message.type !== "session.ready") fail("invalid_message", "type");
+    if (this.capabilities.voice_path_report === true) {
+      this.voicePath = message.protocol === PROTOCOL && message.request_id === this.requestId
+        && message.capabilities?.voice_path_report === true
+        && ["mock-mirror", "provider"].includes(message.voice_path) ? message.voice_path : "unknown";
+    }
+    this.durableNegotiated = this.capabilities.durable_runs === true
+      && message.protocol === PROTOCOL && message.request_id === this.requestId
+      && message.capabilities?.durable_runs === true;
+    this.runDiscovery = this.durableNegotiated && this.capabilities.durable_run_discovery === true
+      && message.capabilities.durable_run_discovery === true;
+    this.responseCancel = this.capabilities.response_cancel === true
+      && message.protocol === PROTOCOL && message.request_id === this.requestId
+      && message.capabilities?.audio_output === true && message.capabilities.response_cancel === true;
     this.started = true;
     return message;
+  }
+
+  cancelResponse(responseId) {
+    if (!this.responseCancel || this.state !== "open") fail("response_cancel_not_negotiated");
+    if (!Number.isSafeInteger(responseId) || responseId < 0) fail("invalid_message", "response_id");
+    this.socket.send(JSON.stringify({protocol: PROTOCOL, type: "response.cancel", response_id: responseId}));
+  }
+
+  async authenticateRun(token) {
+    if (globalThis.location?.origin !== DURABLE_ORIGIN || this.url !== DURABLE_SOCKET
+        || this.socket?.url !== DURABLE_SOCKET) fail("invalid_run_endpoint");
+    if (!this.durableNegotiated || this.state !== "open") fail("durable_runs_not_negotiated");
+    if (this.runAuthenticated || this._runAuth) fail("invalid_run_authentication");
+    if (typeof token !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(token) || token.length !== 43) {
+      fail("invalid_run_grant");
+    }
+    // Route only the authentication reply here. Interleaved audio and
+    // interruptions remain in the normal, bounded receive queue.
+    const reply = new Promise((resolve, reject) => { this._runAuth = {resolve, reject}; });
+    try {
+      this.socket.send(JSON.stringify({protocol: PROTOCOL, type: "agent.run.authenticate", token}));
+      token = null;
+      await this._withStartupDeadline(reply, "authentication");
+      this.runAuthenticated = true;
+    } finally {
+      this._runAuth = null;
+    }
+  }
+
+  async recentRuns() {
+    if (!this.runAuthenticated || this.state !== "open") fail("invalid_run_authentication");
+    if (!this.runDiscovery) fail("run_discovery_not_negotiated");
+    if (this.capabilities.audio_input || this.capabilities.audio_output || this._readingRun) fail("invalid_run_session");
+    this._readingRun = true;
+    try {
+      this.socket.send(JSON.stringify({protocol: PROTOCOL, type: "agent.run.recent"}));
+      const reply = await this._withStartupDeadline(this._nextJson(), "recent runs");
+      if (reply.protocol !== PROTOCOL || reply.type !== "agent.run.recent"
+          || !Array.isArray(reply.runs) || reply.runs.length > 16) fail("invalid_run_reply");
+      return reply.runs.map(({run_id, state}) => {
+        if (typeof run_id !== "string" || !IDENTIFIER.test(run_id) || typeof state !== "string") fail("invalid_run_reply");
+        return {run_id, state};
+      });
+    } finally {
+      this._readingRun = false;
+    }
+  }
+
+  // A dedicated, audio-free connection gives replay an exclusive reader.
+  async readRun(runId, afterCursor = null) {
+    if (!this.runAuthenticated || this.state !== "open") fail("invalid_run_authentication");
+    if (this.capabilities.audio_input || this.capabilities.audio_output || this._readingRun) fail("invalid_run_session");
+    if (typeof runId !== "string" || !IDENTIFIER.test(runId)) fail("invalid_run_id");
+    if (afterCursor !== null && (!Number.isSafeInteger(afterCursor) || afterCursor < 0)) fail("invalid_cursor");
+    const request = {protocol: PROTOCOL, type: "agent.run.result", run_id: runId};
+    if (afterCursor !== null) {
+      request.type = "agent.run.attach";
+      request.after_cursor = afterCursor;
+    }
+    this._readingRun = true;
+    try {
+      this.socket.send(JSON.stringify(request));
+      return await this._withStartupDeadline(this._readRunReply(runId, afterCursor), "run lookup");
+    } finally {
+      this._readingRun = false;
+    }
+  }
+
+  async _readRunReply(runId, afterCursor) {
+    let cursor = afterCursor;
+    let snapshot = null;
+    const events = [];
+    while (true) {
+      const reply = await this._nextJson();
+      if (reply.protocol !== PROTOCOL) fail("invalid_run_reply");
+      if (reply.type === "agent.run.result" || reply.type === "agent.run.snapshot") {
+        const {status, retained, result} = reply;
+        if (status?.run_id !== runId || typeof status.state !== "string" || typeof retained !== "boolean"
+            || (result !== null && (typeof result !== "string" || !retained))) fail("invalid_run_reply");
+        const value = {state: status.state, retained, result};
+        if (afterCursor === null && reply.type === "agent.run.result") return value;
+        if (afterCursor === null || reply.type !== "agent.run.snapshot" || events.length || snapshot
+            || !Number.isSafeInteger(status.cursor) || status.cursor < cursor) fail("invalid_run_reply");
+        snapshot = value;
+        cursor = status.cursor;
+      } else if (afterCursor !== null && reply.run_id === runId && reply.type === "agent.run.event") {
+        if (snapshot || reply.cursor !== cursor + 1 || !Number.isSafeInteger(reply.cursor)
+            || typeof reply.kind !== "string" || events.length >= 1024) fail("invalid_run_reply");
+        cursor = reply.cursor;
+        events.push({cursor, kind: reply.kind, payload: reply.payload});
+      } else if (afterCursor !== null && reply.type === "agent.run.replay"
+          && reply.run_id === runId && reply.resume_cursor === cursor) {
+        return {events, snapshot, cursor};
+      } else {
+        fail("invalid_run_reply");
+      }
+    }
   }
 
   // The clock advances only after `send` returns. A throw means the socket
@@ -299,6 +427,7 @@ export class AvipBrowserClient {
     } else {
       this._rejectConnect = null;
     }
+    this._runAuth?.reject(error);
     const waiters = this._waiters;
     this._waiters = [];
     for (const waiter of waiters) waiter.reject(error);
@@ -316,6 +445,21 @@ export class AvipBrowserClient {
 
   _push(value) {
     if (this.state === "closed") return;
+    if (this._runAuth && typeof value === "string") {
+      let reply;
+      try {
+        reply = JSON.parse(value);
+      } catch {
+        this._fail(new Error("invalid_run_authentication"));
+        this._closeSocket();
+        return;
+      }
+      if (reply?.type === "error" || reply?.type === "agent.run.authenticated") {
+        if (reply.protocol === PROTOCOL && reply.type === "agent.run.authenticated") this._runAuth.resolve();
+        else this._runAuth.reject(new Error("invalid_run_authentication"));
+        return;
+      }
+    }
     const waiter = this._waiters.shift();
     if (waiter) {
       waiter.resolve(value);
