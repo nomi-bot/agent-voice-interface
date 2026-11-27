@@ -1,7 +1,6 @@
 import json
 
 from fastapi import WebSocket, WebSocketDisconnect
-from starlette.websockets import WebSocketDisconnected
 
 from avi.transports.base import TransportDisconnected, TransportFrameError
 
@@ -25,7 +24,7 @@ class WebSocketTransport:
         """
         try:
             message = await self.websocket.receive()
-        except (WebSocketDisconnect, WebSocketDisconnected) as exc:
+        except WebSocketDisconnect as exc:
             raise TransportDisconnected from exc
         if message["type"] == "websocket.disconnect":
             raise TransportDisconnected
