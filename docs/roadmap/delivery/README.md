@@ -2,6 +2,8 @@
 
 Planning snapshot, 2026-11-23. Base `main@f599095`; live gateway candidate [#13](https://github.com/nomi-bot/agent-voice-interface/pull/13) at `bee5d33`. These are implementation specifications. The [approved roadmap](../milestones.md), [AVIP protocol](../../protocols/avip-v1.md) and accepted [ADRs](../../adr/README.md) govern compatibility. Track completion against observable exit gates. Linear's M1 percentage excludes JEV-32.
 
+See the [implementation review and remaining acceptance](offline-acceptance.md) for development priorities and integration status as of 2026-11-28.
+
 ## Dispatch board
 
 One row is one independently reviewable delivery. Each Linear issue gets one integration PR. Multiple agents on one issue can contribute path-scoped commits to its topic branch through its integration owner. Role names describe work, not new assignments. Preserve Papi's JEV-32 and JEV-26 ownership and Nomi's post-merge browser soak. They need not personally execute every test. Jeven authorizes merges.

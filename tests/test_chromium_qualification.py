@@ -103,6 +103,18 @@ class ChromiumQualification(unittest.TestCase):
 
     def exercise(self, browser, grant):
         context = browser.new_context(permissions=["microphone"])
+        # Record the actual fake-device tracks returned by Chromium so the final
+        # assertion checks browser resource release independently of UI text.
+        context.add_init_script("""
+            window.qualificationTracks = [];
+            const devices = navigator.mediaDevices;
+            const capture = devices.getUserMedia.bind(devices);
+            devices.getUserMedia = async constraints => {
+                const stream = await capture(constraints);
+                window.qualificationTracks.push(...stream.getAudioTracks());
+                return stream;
+            };
+        """)
         page = context.new_page()
         page.set_default_timeout(10000)
         errors = []
@@ -122,6 +134,7 @@ class ChromiumQualification(unittest.TestCase):
         password.fill(grant)
         page.locator("#run-attach").click()
         page.wait_for_function("Number(document.querySelector('#run-cursor').value) > 0")
+        self.assertEqual(page.evaluate("window.qualificationTracks.length"), 0)
 
         password.fill(grant)
         page.locator("#voice-tasks").check()
@@ -134,6 +147,8 @@ class ChromiumQualification(unittest.TestCase):
                                arg=uplink_before_stop)
         page.locator("#end").click()
         page.wait_for_function("!document.querySelector('#start').disabled")
+        page.wait_for_function("""window.qualificationTracks.length > 0 &&
+            window.qualificationTracks.every(track => track.readyState === 'ended')""")
         self.assertEqual(errors, [])
 
 

@@ -1,6 +1,6 @@
 # Hermes durable adapter
 
-[JEV-27](../roadmap/delivery/27-hermes-adapter.md) defines the adapter contract. The injected transport supports contract tests. The HTTP transport consumes [JEV-26's pinned runtime evidence](https://github.com/nomi-bot/agent-voice-interface/blob/9834b5dd7d6964ee5ecd9a1ee710ef0b1dbb7a2f/docs/roadmap/delivery/evidence/hermes-runs.json).
+[JEV-27](../roadmap/delivery/27-hermes-adapter.md) defines the adapter contract. The injected transport supports contract tests. The HTTP transport consumes [JEV-26's pinned runtime evidence](../roadmap/delivery/evidence/hermes-runs.json).
 
 ## Run service handoff
 
@@ -18,7 +18,7 @@ The service verifies the principal and checks permissions before every operation
 
 ## Pinned loopback HTTP transport
 
-Install the optional dependency with `python -m pip install '.[hermes]'`. Construct `HermesAgentAdapter(HermesHttpTransport(origin, api_key))` with a numeric loopback origin and a dedicated server bearer credential. Use Hermes commit `0f602c5f6f18615632535251d62a2db74ce93b69` and an isolated profile with `platform_toolsets.api_server` set to an empty list. The [JEV-26 launcher](https://github.com/nomi-bot/agent-voice-interface/blob/9834b5dd7d6964ee5ecd9a1ee710ef0b1dbb7a2f/docs/roadmap/delivery/evidence/probe_hermes_runs.py) provides the profile configuration used in the probe. Keep the bearer in server configuration and the profile's execution environment isolated.
+Install the optional dependency with `python -m pip install '.[hermes]'`. Construct `HermesAgentAdapter(HermesHttpTransport(origin, api_key))` with a numeric loopback origin and a dedicated server bearer credential. Use Hermes commit `0f602c5f6f18615632535251d62a2db74ce93b69` and an isolated profile with `platform_toolsets.api_server` set to an empty list. The [JEV-26 launcher](../roadmap/delivery/evidence/probe_hermes_runs.py) provides the profile configuration used in the probe. Keep the bearer in server configuration and the profile's execution environment isolated.
 
 The HTTP adapter accepts the `read_only` task kind and one nonblank `query` string of up to 4096 characters. It sends the persisted correlation ID as the idempotency key. Generate a fresh correlation ID for each durable admission across principals sharing a Hermes profile. An accepted HTTP receipt supplies the handle. A subsequent status read confirms execution and returns the bounded result. A pending human approval remains an active run. Direct credential or permission refusals become typed denials.
 
@@ -41,4 +41,13 @@ PYTHONPATH=src python docs/roadmap/delivery/evidence/probe_hermes_adapter.py \
   --checkout /path/to/pinned/hermes-agent
 ```
 
-Authenticated gateway composition and durable recovery against the integrated service remain integration gates.
+The [local gateway quickstart](../../README.md#run-the-local-hermes-gateway)
+runs the AVIP routes, authorization, SQLite store, voice journal and maintenance
+loop as one process. Hermes accepts an API key in its dedicated server profile.
+AVI reads that key from `HERMES_API_KEY`. Only the short-lived AVI client grant
+goes into the browser. Reconnection requires a fresh handshake and authentication.
+
+The [integrated AVIP probe](../roadmap/delivery/evidence/probe_hermes_avip.py)
+uses a pinned local Hermes checkout and a deterministic model to exercise the
+gateway without a microphone. See the [release checks](../roadmap/delivery/release.md)
+for the separate live-provider and device evidence.

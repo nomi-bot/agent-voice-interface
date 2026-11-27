@@ -1,8 +1,8 @@
 # Session, response and task lifecycles
 Status: **State contracts implemented in `avi.core.lifecycle`.**
 Reconnect is a legal session edge, but `/ws/avip` does not enter it.
-Voice responses and agent runs are not created on that socket.
-Durable run ownership remains gated on M2.
+Live output has session-scoped response IDs. Authenticated AVIP operations use
+the durable run service, which persists ownership independently of the socket.
 
 The three machines are synchronous and transport-independent. They share
 correlation ids and nothing else. An illegal edge raises `InvalidTransition`
@@ -46,13 +46,12 @@ and does not relabel the session.
 - Protocol and send closes 1002, 1003 and 1013 use `cleanup(failed)`.
 - Any other local close code is also `failed`, so a new code is not recorded
   as a clean disconnect.
-- The driver does not call `lose_transport` or `reattach`. There is still no
-  reconnect handshake.
-- The driver does not construct a `VoiceResponse` or an `AgentRun`.
-- When audio input was negotiated, a mock sink task takes uplink frames it is
-  willing to accept. `reclaim` runs on the producer turn. Closing the
-  VoiceSession cancels that task and clears the media queues. The sink is not
-  a voice provider, and this does not finish M0.
+- A client reconnects by starting a fresh session. A durable run reattach uses
+  separate authentication and a run cursor.
+- The driver delegates provider media and response cancellation to the Live
+  bridge. Its negotiated response IDs identify the currently audible generation.
+- Closing the socket releases its sink, media queues and voice provider. The
+  durable service retains admitted work and owns reconciliation and expiry.
 
 ## VoiceResponse
 
@@ -135,15 +134,14 @@ Correlate with `session_id`, `turn_id`, `response_id`, `run_id` and
 Disconnecting or closing a `VoiceSession` must not cancel an `AgentRun`.
 That includes `lose_transport` and `cleanup`.
 
-## Legacy mock and M2
+## Legacy and durable ownership
 
-The legacy `/ws` mock is unchanged. Its runs are session-owned and cancelled
-on disconnect. That policy is not this state machine, and it is not durable
-ownership. Do not route those mock runs through `AgentRun` until the
-[M2 exit gates](../roadmap/milestones.md#m2-exit-gates) pass together.
-[ADR-009](../adr/009-agent-run-lifecycle.md) records the decision.
+Default legacy `/ws` tasks belong to the originating session and are cancelled
+on disconnect. The opt-in launcher fences legacy admission before opening
+durable submissions. Durable runs belong to the authorized owner and can
+outlive the original socket. A fresh grant for that owner can read or replay
+them within retention. Missing remote evidence leaves reconciliation pending.
 
-The [AVIP draft](../protocols/avip-v1.md) still does not define the remaining
-control and event messages (`session.end`, `playback.stop`, `response.cancel`,
-`agent.run.cancel`, transcripts, and run status). Those messages are not how
-this module is driven.
+See [ADR-009](../adr/009-agent-run-lifecycle.md), the [AVIP negotiated controls](../protocols/avip-v1.md)
+and the [durable extension](../protocols/avip-durable-runs-v1.md) for the wire
+operations and permission model.

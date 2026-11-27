@@ -1,24 +1,16 @@
 # AVIP v1 protocol outline
-Status: **Draft — `/ws/avip` serves the session handshake and, once audio
-input is negotiated, binary media frames. When `GEMINI_API_KEY` and
-`GEMINI_LIVE_MODEL` are both set, accepted uplink PCM is sent to
-`GeminiLiveProvider` and downlink frames are that provider's 16 kHz audio.
-Provider interruption emits `response.interrupted`. When Live is not
-configured, `AVIP_MOCK_MEDIA=1` still enables the M0 PCM mirror and a mock
-sink drains accepted uplink frames. Otherwise the gateway advertises no
-capabilities. `GET /health` reports `voice` as `live`, `mock`, or
-`not_configured`. VoiceSession, VoiceResponse and AgentRun transitions live in
-`avi.core.lifecycle`. This socket uses VoiceSession for connecting, active
-and closed only. It does not enter reconnecting, and it does not create a
-voice response or an agent run. The remaining control and event messages are
-not implemented. `/ws/avip` is not wire-compatible with the legacy `/ws` JSON
-control protocol. M0 is not complete.**
+The loopback gateway implements the handshake, binary PCM, Live response
+events and optional authenticated durable-run controls on `/ws/avip`.
+`GET /health` reports the voice mode as `live`, `mock` or `not_configured`.
+Gemini requires both `GEMINI_API_KEY` and `GEMINI_LIVE_MODEL`. With Live
+unconfigured, `AVIP_MOCK_MEDIA=1` selects the PCM mirror. The optional Hermes
+launcher enables durable controls independently of audio.
 
 ## Intent
 A device-neutral contract with (1) media frames, (2) control commands, (3) asynchronous events. WebSocket is first transport; future transports must preserve semantics without dictating wire framing.
 
 ## Endpoint
-AVIP v1 handshake messages use `GET /ws/avip`. The legacy `/ws` path is unchanged:
+AVIP v1 handshake messages use `GET /ws/avip`. The legacy `/ws` path has its own handshake:
 it still sends `{type: ready, agent, voice}` and accepts `submit`, `status`,
 `ping`, `stop_playback` and `cancel_response`. There is no negotiated upgrade on
 `/ws`. That socket speaks first, so it cannot wait to classify a client frame,
@@ -27,8 +19,8 @@ message as AVIP. Clients select the protocol by path. No WebSocket subprotocol
 is required.
 
 `/ws/avip` checks the same localhost origins as `/ws`. That check is defense in
-depth, not authentication. The path does not construct an agent adapter and does
-not submit runs.
+depth. Durable control authorization requires an authenticated grant on the
+negotiated session. The launcher supplies the run service to the AVIP driver.
 
 ## Proposed JSON envelope
 ```json
@@ -90,17 +82,19 @@ discards the session when the socket ends. Device labels do not select a path.
   plus 32 lowercase hex digits.
 - `capabilities` is an object of strict boolean values. Known names are
   `audio_input`, `audio_output`, `camera`, `display` and `robot_actions`; omitted
-  names default to false. Unknown optional boolean names are ignored and never
+  base names default to false. Recognized extensions are `response_cancel`,
+  `durable_runs` and `durable_run_discovery`. Unknown optional boolean names are ignored and never
   echoed as enabled features. Unknown envelope fields remain errors.
 - Audio directions are relative to the client: input means client capture sent to
   AVI, output means AVI audio played by the client. A feature is negotiated only
   when both the client requests it and the gateway advertises actual support.
   Capability presence is not authorization. Physical actuation is excluded.
 - A `session.ready` reply echoes the validated request ID and includes the
-  gateway-assigned session ID and all five negotiated boolean capabilities.
+  gateway-assigned session ID, all five base capabilities and any enabled
+  extensions.
   An empty capability set is valid for a control-only client. Gateway defaults
-  must remain false until corresponding integrations are enabled. With Live
-  unset and `AVIP_MOCK_MEDIA` unset, `/ws/avip` answers with every capability
+  remain false until corresponding integrations are enabled. With the plain
+  gateway, Live unset and `AVIP_MOCK_MEDIA` unset, `/ws/avip` answers with every capability
   false. `AVIP_MOCK_MEDIA=1` and a complete Live configuration each advertise
   audio input and audio output together, for every client, and still advertise
   no camera, display, or robot actions. Live wins when both are set.
@@ -131,12 +125,15 @@ just sent on this connection.
 {"protocol":"avip/1","type":"error","code":"invalid_message","field":null}
 ```
 
-`code` is `invalid_message`, `unsupported_protocol`, `unsupported_message_type`,
+Base handshake and media codes are `invalid_message`, `unsupported_protocol`, `unsupported_message_type`,
 `session_already_started`, `invalid_frame`, `unsupported_codec`,
 `frame_too_large`, `sequence_anomaly`, `timestamp_regression`, or `queue_full`.
 `field`, when present, is one of `protocol`, `type`, `request_id`, `session_id`,
 `device_id`, `capabilities`, `magic`, `version`, `direction`, `codec`,
-`reserved`, `sequence`, `timestamp_us`, `payload`, or `header`. Any other code
+`reserved`, `sequence`, `timestamp_us`, `payload`, or `header`. Response cancellation also accepts `response_id`. Durable controls add
+`run_id`, `kind`, `arguments` and `after_cursor`, and operation errors
+`access_denied`, `request_conflict`, `admissions_closed`, `invalid_cursor`,
+`operation_unsupported`, `operation_failed` and `outcome_uncertain`. Any other code
 or field name is replaced before it is written: unknown codes become
 `invalid_message` with a null field. `session_already_started` is raised by the
 connection driver. The parser does not raise it. The handshake fixture lists
@@ -146,16 +143,16 @@ these envelopes under `wire_errors`.
 
 1. After the origin check, the server accepts the socket and waits for the first frame. Silence until the shared session idle limit (currently 300 seconds) closes with code 1001 and reason `Idle timeout`. No session is allocated. A binary first frame is rejected as in step 7 and is not decoded.
 2. A valid `session.start` allocates a new session id, negotiates capabilities against support the process actually has enabled, and sends `session.ready`. The id is stored only on that connection. After `session.ready` has been sent, the connection's VoiceSession moves from `connecting` to `active`.
-3. The socket stays ready until it ends. This path has no agent run and no voice response. It does keep a connection-scoped media queue once the session is ready, and, when audio input was negotiated, a mock sink that takes accepted uplink frames. `active_sessions` counts accepted sockets on `/ws` and `/ws/avip` in this process. It is not a session table.
-4. Disconnect, idle timeout, or a fatal protocol close drops the id, cancels the sink task, clears the queue, and moves that VoiceSession through `closing` to `closed`. Peer disconnect and idle timeout (close 1001) record `disconnected`. Protocol and send failures (1002, 1003, 1013) record `failed`. The machine does not enter `reconnecting`. Nothing is written to disk. A later connection starts over with `session_id: null` and receives a new id. The previous id is not a lookup key. Legacy `/ws` mock runs stay on their own sockets and still end when those sockets end. `/ws/avip` does not cancel, persist or resume them. The allowed edges are in the [lifecycle guide](../architecture/session-lifecycle.md).
+3. The socket stays ready until it ends. Negotiated media uses connection-scoped queues. Live response events and authenticated durable operations are available when their capabilities are negotiated. `active_sessions` counts accepted sockets on both routes.
+4. Disconnect or fatal close releases the connection's provider, queues and session ID. The VoiceSession closes with a reason. A reconnect starts with `session_id: null` and receives a new ID. Durable task state persists independently. Authenticate the new socket to discover, read or replay an owned run. See the [lifecycle guide](../architecture/session-lifecycle.md).
 5. A second JSON object whose `type` is `session.start` is `session_already_started`, whatever the other fields contain. The driver does not parse it as a new session and does not replace the id. It then closes the socket.
 6. Any other failure of the first frame closes the socket. A retry is a new connection.
 7. Text that is not a JSON object is `invalid_message` and closes with code 1002 and reason `Protocol error`. A binary frame before `session.ready`, or any binary frame when `audio_input` was not negotiated, is `invalid_message` and closes with code 1003 and reason `Unsupported data`. Those bytes are not decoded, stored, or forwarded.
-8. After ready, a JSON object that is not a session start returns `unsupported_message_type` with `field: type` and the ready session stays up. Text is never parsed as a media frame.
+8. After ready, an unrecognized JSON control returns `unsupported_message_type` with `field: type` and the ready session stays up. Text is never parsed as a media frame.
 9. A send that exceeds the shared send limit (currently 5 seconds) closes with code 1013 and reason `Send timeout`. That limit covers JSON envelopes and mirrored media frames. The frame may not have been delivered. A missing or foreign origin closes with code 1008 and an empty reason, before accept, and produces no AVIP envelope.
-10. After ready, with `audio_input` negotiated, each binary message is one complete frame passed to `unpack_frame` and then `MediaDelivery.submit` on the uplink queue. Clients may send `audio_uplink` only. An `audio_downlink` frame from the client is `invalid_frame` with `field: direction` and closes with code 1002 and reason `Protocol error`. Other media `ProtocolError`s use the same close, after the error envelope. `queue_full` is the exception: the envelope is sent and the socket stays open. The refused frame does not advance the uplink sequence. A mock sink takes accepted uplink frames and discards the PCM. While that sink keeps up with the sender, the depth cap is not reached. If the sink is not taking, the cap still applies and `queue_full` behaves as above. The sink is not a voice provider.
+10. After ready, with `audio_input` negotiated, each binary message is one complete frame passed to `unpack_frame` and then `MediaDelivery.submit` on the uplink queue. Clients may send `audio_uplink` only. An `audio_downlink` frame from the client is `invalid_frame` with `field: direction` and closes with code 1002 and reason `Protocol error`. Other media `ProtocolError`s use the same close, after the error envelope. `queue_full` is the exception: the envelope is sent and the socket stays open. The refused frame does not advance the uplink sequence. On the mock path a sink takes accepted uplink frames and discards the PCM. While that sink keeps up with the sender, the depth cap is not reached. If the sink is not taking, the cap still applies and `queue_full` behaves as above. The sink is not a voice provider.
 
-Close reasons are fixed strings. They do not contain client data. There is no replay cursor and no reconnect handshake.
+Close reasons are fixed strings. They do not contain client data. Media starts afresh on a new socket. Durable event replay has a separate per-run cursor.
 
 ## Binary media frames
 
@@ -270,7 +267,9 @@ from the current time. The gateway buffers up to 96,000 bytes (three seconds
 of PCM), including any in-flight frame. At capacity it drops excess audio
 and continues reading control events. A provider interruption clears unsent
 audio and emits `response.interrupted`. The gateway handles `turn_complete`
-and `tool_call` internally and acknowledges tool calls with an empty result.
+at the voice bridge. A plain Live session acknowledges its compatibility tool.
+An authenticated durable voice session routes its declared task tools through
+the query allowlist and the owner-scoped run service.
 A provider error, including GoAway, closes the socket with `1011` and the
 reason `Voice provider unavailable`.
 That close is not session renewal. The default development gateway, with
@@ -283,12 +282,12 @@ and timestamp rules, payload bounds, reject-newest backpressure, socket
 attachment, and wire errors for media failures including `queue_full`. Still open:
 
 - Route framed audio through the gateway to a second voice provider. Gemini Live is mounted when configured. The mock sink and the mirror remain the path when it is not.
-- Negotiate a measured codec and sample rate in the handshake. Real-time resampling, jitter buffering, and concealment wait on that measurement (M1) and on full-duplex recovery (M3).
-- AuthN/AuthZ of devices and robot actions; when and how remote runs can be reattached. The handshake above does not define that policy.
+- Negotiate a measured codec and sample rate in the handshake. The Live adapter already resamples its fixed profile. Alternate codecs, negotiated rates and jitter concealment remain open.
+- Device authentication and authorization for wire-level robot actions. Durable run access already uses the negotiated extension.
 - Trace context beyond the media clock defined above, and a way to measure
   cross-host latency without subtracting unsynchronized clocks.
-- Status/progress model for ROS 2 actions and cancellation acknowledgments.
-- Driving VoiceResponse, AgentRun, or VoiceSession `reconnecting` from this socket. The state contracts themselves are implemented in `avi.core.lifecycle`. This connection uses VoiceSession for `connecting`, `active` and `closed` only.
+- A wire-level ROS 2 action protocol. The optional client bridge implements a local mock action lifecycle.
+- Reusing a VoiceSession ID across reconnects. Current clients start a fresh media session and separately reattach to durable tasks.
 - The remaining session and transcript messages (`session.end`, `playback.stop` and transcripts).
 
 ## Conformance
@@ -372,7 +371,7 @@ AVIP version 1 downlink is 16 kHz. The speaker refuses any other declared
 rate instead of playing those bytes on a 16 kHz buffer. Gemini Live output is
 24 kHz. That rate is not this profile. `resampleS16leToAvip` converts one
 buffer. `S16leResampler` keeps the cursor across chunks. `GeminiLiveProvider`
-does the same conversion in Python before any future gateway would pack an
+does the same conversion in Python before the gateway packs an
 AVIP downlink frame. The mock mirror is already 16 kHz, and this demo does not
 run that conversion. The voice files are served from `clients/browser` in a
 source checkout and from `avi/_browser` inside a wheel. A complete packaged
