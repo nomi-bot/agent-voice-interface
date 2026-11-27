@@ -178,14 +178,14 @@ export class VoiceTelemetry {
     now = defaultNow,
     wallNow = () => Date.now(),
     client,
-    path = "mock-mirror",
+    path = "unknown",
     scenario,
     sampleCap = SAMPLE_CAP,
   } = {}) {
     this.now = now;
     this.wallNow = wallNow;
     this.client = CLIENTS.has(client) ? client : "unknown";
-    this.path = PATHS.has(path) ? path : "mock-mirror";
+    this.path = PATHS.has(path) ? path : "unknown";
     this.scenario = typeof scenario === "string" && TOKEN.test(scenario) ? scenario : "unknown";
     this.anchorSessionMs = now();
     this.anchorWallMs = wallNow();
@@ -232,13 +232,14 @@ export class VoiceTelemetry {
   }
 
   noteUplink(sessionMs) {
-    this.uplinkAt.push(this._at(sessionMs));
+    if (this.path === "mock-mirror") this.uplinkAt.push(this._at(sessionMs));
   }
 
   noteDownlink(sessionMs) {
     const at = this._at(sessionMs);
     if (this.lastDownlink !== null) this.jitter.record(Math.abs(at - this.lastDownlink - NOMINAL_FRAME_MS));
     this.lastDownlink = at;
+    if (this.path !== "mock-mirror") return;
     if (this.pair < this.uplinkAt.length) {
       const sent = this.uplinkAt[this.pair];
       this.pair += 1;
@@ -320,7 +321,8 @@ export class VoiceTelemetry {
     }
     const intervalsMs = {};
     for (const [label, start, end] of INTERVALS) {
-      intervalsMs[label] = (
+      const paired = ["uplinkToDownlink", "uplinkToAudible", "downlinkToAudible"].includes(label);
+      intervalsMs[label] = (!paired || this.path === "mock-mirror") && (
         Object.prototype.hasOwnProperty.call(this.marks, start) &&
         Object.prototype.hasOwnProperty.call(this.marks, end)
       ) ? this.marks[end] - this.marks[start] : null;
@@ -366,7 +368,9 @@ export class VoiceTelemetry {
         sinkConsumed: this.sinkConsumed,
       },
       e2e: {
-        scope: this.path === "provider" ? "provider" : "mock-mirror",
+        scope: this.path,
+        method: this.path === "mock-mirror" ? "mock-frame-pair" : "unmeasured",
+        playbackObservation: "schedule-only",
         unit: "ms",
         clock: "session",
         uplinkToDownlink: this.e2e.snapshot(),

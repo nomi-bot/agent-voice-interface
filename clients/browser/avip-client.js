@@ -250,6 +250,11 @@ export class AvipBrowserClient {
     this.socket.send(text);
     const message = await this._withStartupDeadline(this._nextJson(), "handshake");
     if (message.type !== "session.ready") fail("invalid_message", "type");
+    if (this.capabilities.voice_path_report === true) {
+      this.voicePath = message.protocol === PROTOCOL && message.request_id === this.requestId
+        && message.capabilities?.voice_path_report === true
+        && ["mock-mirror", "provider"].includes(message.voice_path) ? message.voice_path : "unknown";
+    }
     this.durableNegotiated = this.capabilities.durable_runs === true
       && message.protocol === PROTOCOL && message.request_id === this.requestId
       && message.capabilities?.durable_runs === true;

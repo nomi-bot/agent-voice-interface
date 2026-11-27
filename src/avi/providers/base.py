@@ -28,3 +28,17 @@ class TargetedResponseCancellation(Protocol):
     """Providers label audible events with a session-local response ID."""
 
     async def cancel_response_if_current(self, response_id: int) -> None: ...
+
+
+@dataclass(frozen=True)
+class TokenUsage:
+    provider: str
+    input_tokens: int | None
+    output_tokens: int | None
+
+
+@runtime_checkable
+class TokenUsageReporter(Protocol):
+    """A provider with one latest usage snapshot scoped to this connection."""
+
+    def latest_token_usage(self) -> TokenUsage | None: ...

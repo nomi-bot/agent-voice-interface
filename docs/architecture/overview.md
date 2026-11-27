@@ -26,11 +26,14 @@ AVI gateway: sessions | media router | events | capability registry | runs
 - Prefer an optional ROS 2 bridge so gateway and common Python SDK need no ROS 2 installation.
 - Instrument latency, interruption, queue depth, errors and resources; do not claim performance targets before measurements.
 
-## Present implementation versus desired behavior
-Current initialization skeleton includes FastAPI JSON WebSocket control, the `/ws/avip` session handshake, mock PCM framing on that same socket, a mock uplink sink that drains accepted frames, a mock agent, bounded queues, and session-owned runs cancelled at disconnect on `/ws`. The headless SDK is `avip_client`. The browser adapter is `clients/browser/avip-client.js`. They encode AVIP separately, and conformance checks the bytes. `clients/browser/voice.js` captures a microphone into those uplink frames and plays downlink PCM against the mock mirror. Session-clock timestamps and drop counters from that path are a local JSON report, not a new AVIP message. VoiceSession, VoiceResponse and AgentRun transition contracts are implemented in core; `/ws/avip` applies the session contract through active and closed only. `GeminiLiveProvider` is mounted on `/ws/avip` when both Live environment variables are set; otherwise the socket stays on the mock mirror or advertises no audio. Hermes, the remaining AVIP control events, and durable AgentRuns are not implemented. Moving runs beyond voice-session lifetimes is a planned M2 change, not a current capability. M0 is not complete.
+## Implemented paths
+
+The browser SDK and headless Python SDK negotiate the same AVIP route and independently serialize PCM frames. The gateway supports a mock mirror and a configured Gemini Live provider. A voice socket owns its media buffers and its current response. The optional local Hermes launcher adds authenticated durable runs, recent-run discovery and cursor replay. An authorized caller can reconnect with a fresh voice session and retrieve an existing task. The legacy `/ws` route retains its own session-scoped semantics.
+
+See the [implementation review](../roadmap/delivery/offline-acceptance.md) for the state of each requirement and its outstanding release evidence.
 
 ## Documentation map
-- [Current architecture](../architecture.md): executable skeleton behavior.
+- [Current architecture](../architecture.md): gateway and client behavior.
 - This overview: accepted target direction, not an implementation claim.
 - [Canonical milestones](../roadmap/milestones.md): single M0–M4 implementation plan.
 - [ADR index and numbering policy](../adr/README.md): unique three-digit identifiers;

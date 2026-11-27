@@ -142,6 +142,7 @@ export async function liveProbe(url, frames) {
         deviceId: "browser-telemetry-001",
         capabilities: {
           audio_input: true,
+          voice_path_report: true,
           audio_output: true,
           camera: false,
           display: false,
@@ -152,6 +153,7 @@ export async function liveProbe(url, frames) {
       try {
         await client.connect({Origin: "http://127.0.0.1:8000"});
         const ready = await client.start();
+        if (client.voicePath !== "mock-mirror") throw new Error("mock probe requires a confirmed mirror");
         return {client, ready};
       } catch (error) {
         client.close();

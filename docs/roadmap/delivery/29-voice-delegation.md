@@ -32,3 +32,35 @@ The opt-in gateway binds a distinct durable control channel to each AVIP socket.
 A new authenticated turn can query the result by AVI run ID. The service's owner-scoped admitted-request lookup recovers missing journal bindings after a crash without submitting a task. A closed socket's private journal rows expire after the retry window. Single-process startup marks abandoned sockets closed before admitting new ones.
 
 The ASGI integration test uses a scripted provider and a deterministic backend. It covers an allowed delegation, policy denial, late authentication, provider tool expiry, interruption, a fresh-session result and cross-owner isolation. Run it with `python -m unittest discover -s tests -p test_voice_gateway_delegation.py -v`. Live Gemini and Hermes plus the real mic/speaker acceptance still require a separately recorded run. Measure provider reply acceptance and audible result separately.
+
+### Operator-run prerecorded speech qualification
+
+Use two operator-supplied synthetic **mono, 16 kHz, signed 16-bit PCM WAV** files (up to 30 seconds each). In the first, ask Gemini to delegate the exact approved read-only query to the agent, verbatim. In the second, ask it to look up the retained result of the task it just submitted using its run ID and speak the result. Use a synthetic task with a recognizable answer for later listening. Keep the exact query text in a local UTF-8 file with at most a trailing newline. Speech recognition or model paraphrasing can change the submitted text and trigger the launcher's exact-match denial. Inspect the fixture or wording before any new attempt.
+
+Install the Live and Hermes extras and run the project's pinned Hermes API server with its isolated, tool-disabled profile. Use a fresh private state directory for this test. In the gateway environment configure `HERMES_API_KEY`, `GEMINI_API_KEY` and the operator-selected `GEMINI_LIVE_MODEL`. Start the local gateway with a backend scope that identifies this origin, profile and credential epoch.
+
+```sh
+python -m avi.local_gateway --state-dir "$AVI_STATE" --hermes-origin "$HERMES_ORIGIN" \
+  --backend-scope "$AVI_BACKEND_SCOPE" --owner speech-qualification \
+  --allow-query "$(cat "$APPROVED_QUERY_FILE")"
+```
+
+From the repository root the following command opens one live, potentially billable voice session. It uses the launcher's private grant on numeric loopback and the two WAVs as paced audio input. It never generates a text submission or retries a voice turn. The optional `--review-wav` creates a new owner-only WAV containing downlink audio received from the start of the follow-up turn. Omit that option to discard audio. Keep this recording private.
+
+```sh
+python docs/roadmap/delivery/evidence/probe_spoken_delegation.py --live \
+  --state-dir "$AVI_STATE" --query-file "$APPROVED_QUERY_FILE" \
+  --command-wav "$SYNTHETIC_COMMAND_WAV" --followup-wav "$SYNTHETIC_FOLLOWUP_WAV" \
+  --review-wav "$NEW_PRIVATE_REVIEW_WAV"
+```
+
+The default invocation prints a skip without connecting. Missing fixtures or local grant also skip. Once attempted, an incomplete run exits nonzero, including the 150-second deadline. A timeout after submission can leave a running task. Inspect the owner’s recent runs before considering a separate attempt.
+
+| Report observation | Interpretation |
+| --- | --- |
+| Exactly one session-bound submission with the approved task digest, accepted backend handle, completed state and retained nonempty result | The configured backend reported completion for this session's approved task. This evidence cannot establish how often the upstream model internally executed. |
+| Delegation and result-read replies acknowledged | The provider SDK accepted replies correlated to this session and run. The report omits prompts, results, run IDs, provider handles, grants and model text. |
+| Positive PCM bytes observed after the journal showed the result-read acknowledgement | The client received downlink PCM after that observation. A short answer that finished before the poll observed acknowledgement can yield an incomplete report. |
+| Human spoken accuracy | Initially `unreviewed`. Listen to the private follow-up WAV, compare it to the expected synthetic answer, and separately record correct, incorrect or indeterminate. Keep task content and recordings out of the shared report. |
+
+This probe covers the positive, credentialed transport path. Denied tasks, upstream failures, acoustic playback latency and physical devices have separate acceptance gates. To validate the probe offline, run `python -m unittest discover -s tests -p test_spoken_qualification.py -v`.

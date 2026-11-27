@@ -354,7 +354,7 @@ export class BrowserVoice {
     media = browserMedia(),
     audio = createBrowserAudio(),
     downlinkRateHz = SAMPLE_RATE_HZ,
-    path = "mock-mirror",
+    path = "unknown",
   } = {}) {
     this.now = now;
     this.onMetric = onMetric;
@@ -562,6 +562,10 @@ export class BrowserVoice {
       if (capabilities.robot_actions) {
         throw voiceError("invalid_state", "This voice client does not enable robot actions.");
       }
+      if (this.client.capabilities?.voice_path_report === true) {
+        this.telemetry.path = this.client.voicePath ?? "unknown";
+      }
+      this.telemetry.setSessionId(opened.ready.session_id);
       const audio = await this.audio.open({
         stream: this.stream,
         onSamples: (samples, sampleRate) => this._onSamples(samples, sampleRate),
@@ -698,10 +702,10 @@ export class BrowserVoice {
       this.telemetry.noteBufferDepth(this.speaker.depthFrames());
     }
     if (played) {
-      const heard = this.now();
+      const scheduledAt = this.now();
       this.stats.playbackFrames += 1;
-      this._markAt("playback-start", heard);
-      this.telemetry.noteAudible(heard);
+      this._markAt("playback-start", scheduledAt);
+      this.telemetry.noteAudible(scheduledAt);
     } else {
       this.stats.playbackDrops += 1;
     }

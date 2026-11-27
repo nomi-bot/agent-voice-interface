@@ -73,6 +73,7 @@ class Capabilities:
     camera: bool = False
     display: bool = False
     robot_actions: bool = False
+    voice_path_report: bool = False
     response_cancel: bool = False
     durable_runs: bool = False
     durable_run_discovery: bool = False
@@ -157,6 +158,8 @@ def error_envelope(error: ProtocolError) -> dict:
 def negotiate_capabilities(requested: Capabilities, available: Capabilities) -> Capabilities:
     """Select only features requested by the client and supported by the gateway."""
     accepted = {name: getattr(requested, name) and getattr(available, name) for name in _CAPABILITY_NAMES}
+    if not (accepted["audio_input"] or accepted["audio_output"]):
+        accepted["voice_path_report"] = False
     if not accepted["audio_output"]:
         accepted["response_cancel"] = False
     if not accepted["durable_runs"]:
@@ -188,7 +191,7 @@ def session_ready(start: SessionStart, session_id: str, available: Capabilities)
     Callers must advertise actual enabled support, not planned capabilities.
     """
     capabilities = asdict(negotiate_capabilities(start.capabilities, available))
-    for extension in ("durable_runs", "durable_run_discovery", "response_cancel"):
+    for extension in ("durable_runs", "durable_run_discovery", "response_cancel", "voice_path_report"):
         if not capabilities[extension]:
             del capabilities[extension]
     return {

@@ -2,6 +2,7 @@
 
 import asyncio
 from pathlib import Path
+from types import SimpleNamespace
 import traceback
 import unittest
 
@@ -197,6 +198,21 @@ class ProviderContractTests(unittest.IsolatedAsyncioTestCase):
         source = (ROOT / "src" / "avi" / "main.py").read_text()
         self.assertNotIn("GeminiLiveProvider", source)
         self.assertNotIn("GEMINI_API_KEY", source)
+
+    def test_usage_snapshot_ignores_unsafe_counts_without_enqueuing_events(self):
+        provider = GeminiLiveProvider(env={}, max_control_events=1)
+        self.assertIsNone(provider.latest_token_usage())
+        valid = SimpleNamespace(prompt_token_count=2**53 - 1, response_token_count=3)
+        provider._handle_message(SimpleNamespace(usage_metadata=valid))
+        self.assertEqual(provider.latest_token_usage().input_tokens, 2**53 - 1)
+        for count in (-1, 1.5, True, "3", 2**53, 10**500):
+            with self.subTest(count_type=type(count).__name__):
+                metadata = SimpleNamespace(prompt_token_count=count, response_token_count=0)
+                self.assertFalse(provider._handle_message(SimpleNamespace(usage_metadata=metadata)))
+                self.assertIsNone(provider.latest_token_usage().input_tokens)
+                self.assertEqual(provider.latest_token_usage().output_tokens, 0)
+        self.assertFalse(provider._handle_message(SimpleNamespace()))
+        self.assertEqual(provider.latest_token_usage().output_tokens, 0)
 
     async def test_missing_key_does_not_connect(self):
         provider = GeminiLiveProvider(env={"GOOGLE_API_KEY": "other-secret"})

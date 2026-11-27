@@ -15,6 +15,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -321,6 +322,36 @@ class ProviderBridgeTests(unittest.IsolatedAsyncioTestCase):
             await task
         self.assertEqual(active_mock_sinks(), frozenset())
         self.assertEqual(session.telemetry_report["path"], "mock-mirror")
+
+    async def test_gemini_usage_snapshot_reaches_gateway_report_while_audio_flows(self):
+        from test_gemini_live_provider import FakeSession, _audio_message, _pcm, _provider
+
+        upstream = FakeSession()
+        provider = _provider(upstream, max_control_events=1)
+        transport = Gate()
+        session = self._session(transport, provider)
+        task = asyncio.create_task(session.run())
+        try:
+            await self._ready(transport)
+            for _ in range(10):
+                await upstream.push(SimpleNamespace(usage_metadata=SimpleNamespace(
+                    prompt_token_count=12, response_token_count=6, credential=SECRET,
+                )))
+            latest = _audio_message(_pcm(42, 480))
+            latest.usage_metadata = SimpleNamespace(response_token_count=3, account=SECRET)
+            await upstream.push(latest)
+            self.assertEqual(unpack_frame(await asyncio.wait_for(transport.next_item(), 1)).sequence, 0)
+            self.assertEqual(_text_types(transport.sent), ["session.ready"])
+        finally:
+            await transport.inbox.put(None)
+            await task
+        report = session.telemetry_report
+        self.assertEqual(report["costScope"], "latest-provider-usage-snapshot")
+        self.assertEqual(report["cost"], {
+            "provider": "gemini-live", "currency": None, "inputTokens": None,
+            "outputTokens": 3, "audioInputSeconds": None, "audioOutputSeconds": None, "amount": None,
+        })
+        self.assertNotIn(SECRET, json.dumps(report))
 
     async def test_uplink_is_forwarded_and_downlink_is_provider_audio(self):
         uplink = b"\x11\x22\x33\x44"
@@ -653,13 +684,16 @@ class GatewayRouteTests(unittest.IsolatedAsyncioTestCase):
                 async with app.router.lifespan_context(app):
                     async with connection() as (incoming, outgoing):
                         self.assertEqual((await outgoing.get())["type"], "websocket.accept")
-                        await send(incoming, _start())
+                        start = _start()
+                        start["capabilities"]["voice_path_report"] = True
+                        await send(incoming, start)
                         ready = json.loads((await outgoing.get())["text"])
                         self.assertEqual(ready["type"], "session.ready")
                         self.assertTrue(ready["capabilities"]["audio_input"])
                         self.assertTrue(ready["capabilities"]["audio_output"])
                         self.assertFalse(ready["capabilities"]["robot_actions"])
                         self.assertTrue(fake.started)
+                        self.assertEqual(ready["voice_path"], "provider")
                         await send_frame(incoming, data=_uplink(uplink))
                         event = await asyncio.wait_for(outgoing.get(), 1)
                         frame = unpack_frame(event["bytes"])

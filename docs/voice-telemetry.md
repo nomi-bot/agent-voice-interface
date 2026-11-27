@@ -2,8 +2,7 @@
 
 Local measurements for one voice session. The report is JSON for a dashboard
 or a CI artifact. It is not an AVIP frame and it does not add a control
-message. The mock mirror (`AVIP_MOCK_MEDIA=1`) is the path this measures.
-Gemini Live is not implemented here.
+message. Each browser audio connection requests `voice_path_report`. The gateway identifies the actual mounted path in that socket’s correlated ready frame. An older gateway leaves the browser path `unknown`.
 
 ## Clocks
 
@@ -37,13 +36,13 @@ sample of each name sticks.
 | `session-start` | Capture, handshake, and the speaker are up. The session is live. |
 | `first-uplink` | The first uplink frame was accepted by `send`. |
 | `first-downlink` | The first downlink payload was observed. |
-| `playback-start` | The first downlink frame was accepted by the speaker. This is the first audible sample. A local `stopPlayback` does not emit it. |
+| `playback-start` | The first Web Audio source has been scheduled on the page. Measuring audible onset requires acoustic or output-device evidence. |
 
 `intervalsMs` is the difference of those marks. `e2e.uplinkToDownlink` is the
 distribution of paired samples (count, min, max, mean, nearest-rank p50 and
 p95, and a histogram). Percentiles use every sample until 4096, then a
 reservoir; the histogram, count, min, max, and mean stay exact.
-`e2e.uplinkToAudible` is the same pairing for frames the speaker accepted.
+The legacy `e2e.uplinkToAudible` key records scheduling time for accepted mock frames. `e2e.playbackObservation` labels this proxy as `schedule-only`. For provider and unknown paths, `e2e.method` is `unmeasured`, both paired distributions are empty, and the corresponding intervals are null. Raw local-clock marks remain available.
 
 Counters include `captureDrops`, `transmitDrops`, and `speakerDrops` (the
 speaker-buffer drops already counted as `playbackDrops` on the page).
@@ -117,8 +116,16 @@ The development gateway constructs telemetry with `path="mock-mirror"` and
 `scenario="gateway"` on the mirror. A mounted Live session uses
 `path="provider"` and `scenario="gemini-live"`, so that interval is not
 labeled as mock-mirror loopback. Those are constructor arguments
-(`telemetry_path`, `telemetry_scenario`). The Live report still leaves
-`cost` null and does not store PCM or a resumption handle.
+(`telemetry_path`, `telemetry_scenario`). When Gemini supplies `usage_metadata`, the gateway
+reports `costScope: "latest-provider-usage-snapshot"` and copies the most recent
+`prompt_token_count` and `response_token_count` into `cost.inputTokens` and
+`cost.outputTokens`. A new metadata object replaces both counts. A missing,
+negative or non-integer count, or one outside the JSON safe integer range, is
+reported as null. Messages without metadata preserve the previous snapshot.
+Each report describes one provider connection. The gateway does not sum these
+snapshots across responses or infer billable amounts, currency or audio duration.
+When usage is unavailable the cost fields remain null and the scope field is
+omitted. The gateway retains no raw metadata, PCM or resumption handle.
 
 ## Gemini
 

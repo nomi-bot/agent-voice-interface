@@ -153,6 +153,7 @@ function boot(options = {}) {
     media,
     audio,
     downlinkRateHz: options.downlinkRateHz,
+    path: options.path,
   });
   const ctx = {voice, client, audio, media, statuses, metrics, clock, connects: 0};
   ctx.start = voice.start({
@@ -199,6 +200,7 @@ async function runLive(url) {
         requestId: "req-voice-live",
         deviceId: "browser-voice-001",
         capabilities: {
+          voice_path_report: true,
           audio_input: true,
           audio_output: true,
           camera: false,
@@ -852,8 +854,46 @@ await check("gemini-24k-pcm-is-not-played-as-avip-16k", async () => {
   }
 });
 
+await check("live-and-unknown-paths-keep-playback-scheduling-separate-from-acoustic-latency", async () => {
+  for (const [remotePath, requestId, expected] of [
+    ["provider", "req-voice-001", "provider"],
+    [undefined, "req-voice-001", "unknown"],
+    ["unsupported", "req-voice-001", "unknown"],
+    ["mock-mirror", "other-request", "unknown"],
+  ]) {
+    const client = liveClient();
+    client.started = false;
+    client.capabilities.voice_path_report = true;
+    const ctx = boot({client, connect: async (lease) => {
+      lease.adopt(client);
+      const ready = client.start();
+      client._push(JSON.stringify({
+        type: "session.ready", protocol: "avip/1", request_id: requestId,
+        capabilities: readyCapabilities({voice_path_report: remotePath !== undefined}), voice_path: remotePath,
+      }));
+      return {client, ready: await ready};
+    }});
+    try {
+      await ctx.start;
+      ctx.audio.samples(new Float32Array(320), 16000);
+      pushDownlink(client);
+      await flush();
+      const report = ctx.voice.telemetry.report();
+      assert.equal(report.path, expected);
+      assert.equal(report.e2e.method, "unmeasured");
+      assert.equal(report.e2e.uplinkToDownlink.count, 0);
+      assert.equal(report.e2e.uplinkToAudible.p95, null);
+      assert.equal(report.intervalsMs.uplinkToAudible, null);
+      assert.equal(report.counters.playbackFrames, 1);
+      assert.equal(report.e2e.playbackObservation, "schedule-only");
+    } finally {
+      await ctx.voice.stop();
+    }
+  }
+});
+
 await check("telemetry-report-uses-the-session-clock", async () => {
-  const ctx = boot({wallNow: () => 1700000000000});
+  const ctx = boot({path: "mock-mirror", wallNow: () => 1700000000000});
   try {
     await ctx.start;
     for (let index = 0; index < 10; index += 1) {

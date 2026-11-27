@@ -93,14 +93,14 @@
     <dl>
       <dt>Uplink frames</dt><dd id="uplink">0</dd>
       <dt>Downlink frames</dt><dd id="downlink">0</dd>
-      <dt>Played frames</dt><dd id="played">0</dd>
+      <dt>Scheduled playback frames</dt><dd id="played">0</dd>
       <dt>Capture drops</dt><dd id="capture-drops">0</dd>
       <dt>Transmit drops</dt><dd id="transmit-drops">0</dd>
       <dt>Playback drops</dt><dd id="playback-drops">0</dd>
     </dl>
 
     <h2>Timing hooks</h2>
-    <p>Session clock only (<code>performance.now</code> on this page). <code>capture-start</code>, <code>session-start</code>, <code>first-uplink</code>, <code>first-downlink</code>, and <code>playback-start</code> share that clock. The JSON report below also stores one wall-clock anchor so the session can be placed on a timeline. Neither clock is the AVIP media timestamp, and neither is a cross-host latency.</p>
+    <p>Session clock only (<code>performance.now</code> on this page). <code>capture-start</code>, <code>session-start</code>, <code>first-uplink</code>, <code>first-downlink</code>, and <code>playback-start</code> share that clock. Playback-start records when Web Audio schedules a buffer. Audible onset requires a separate measurement. The JSON report below also stores one wall-clock anchor so the session can be placed on a timeline. Neither clock is the AVIP media timestamp, and neither is a cross-host latency.</p>
     <dl id="metrics">
       <dt>capture-start</dt><dd>—</dd>
       <dt>first-uplink</dt><dd>—</dd>
@@ -251,7 +251,7 @@
       if (detail && detail.message) return detail.message;
       if (name === "requesting-permission") return "Requesting microphone permission…";
       if (name === "connecting") return "Microphone is live. Opening the AVIP session…";
-      if (name === "live") return "Live. Microphone audio is going to the gateway, and mirrored audio is playing here. Use headphones.";
+      if (name === "live") return "Connected. Microphone audio is going to the gateway. Use headphones.";
       if (name === "avip-error") return "The gateway reported a media error. The page is still listening.";
       return name;
     }
@@ -304,6 +304,7 @@
               capabilities: {
                 response_cancel: true,
                 audio_input: true,
+                voice_path_report: true,
                 audio_output: true,
                 camera: false,
                 display: false,

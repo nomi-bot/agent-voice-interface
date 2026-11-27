@@ -63,6 +63,8 @@ Optional durable messages are in the [durable runs extension](avip-durable-runs-
 Unknown ready-session controls return `unsupported_message_type`.
 
 
+Audio clients can request the boolean capability `voice_path_report`. When it is negotiated, `session.ready` includes `voice_path` with `provider` after the provider opens, or `mock-mirror` for the gateway mirror. Clients treat absent or unrecognized metadata as `unknown`. Clients that omit the capability retain their original ready envelope.
+
 ## Initial session handshake contract
 
 `avi.protocols.avip` validates already-decoded JSON and builds replies. It does

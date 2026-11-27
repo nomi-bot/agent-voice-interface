@@ -23,7 +23,7 @@ import os
 from typing import Any
 
 from avi.core.events import VoiceEvent
-from avi.providers.base import VoiceCapabilities
+from avi.providers.base import TokenUsage, VoiceCapabilities
 from avi.providers.gemini_live_spike import (
     INPUT_SAMPLE_RATE_HZ,
     OUTPUT_SAMPLE_RATE_HZ,
@@ -295,6 +295,11 @@ def live_connect_config(tool_behavior: str, *, enable_delegation_tools: bool = F
     )
 
 
+def _reported_tokens(value: object) -> int | None:
+    # Preserve exact nonnegative counts across Python and JavaScript JSON clients.
+    return value if type(value) is int and 0 <= value < 2**53 else None
+
+
 class GeminiLiveProvider:
     """Live API session behind ``VoiceProvider``.
 
@@ -338,6 +343,7 @@ class GeminiLiveProvider:
         self.dropped_audio_events = 0
         self.flushed_audio_events = 0
         self.resumption_updates = 0
+        self._last_usage: TokenUsage | None = None
         self._env = os.environ if env is None else env
         self._connector = connector
         self._uplink = _ChunkQueue(max_uplink_chunks)
@@ -581,7 +587,17 @@ class GeminiLiveProvider:
             return
         await self._shutdown(reader=True)
 
+    def latest_token_usage(self) -> TokenUsage | None:
+        return self._last_usage
+
     def _handle_message(self, message: object) -> bool:
+        usage = getattr(message, "usage_metadata", None)
+        if usage is not None:
+            self._last_usage = TokenUsage(
+                "gemini-live",
+                _reported_tokens(getattr(usage, "prompt_token_count", None)),
+                _reported_tokens(getattr(usage, "response_token_count", None)),
+            )
         self._note_resumption(message)
         if getattr(message, "go_away", None) is not None:
             self._events.push_control(VoiceEvent(kind="error", payload={"code": "go_away"}))

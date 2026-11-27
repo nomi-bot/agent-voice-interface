@@ -55,7 +55,7 @@ from avi.protocols.media import (
     pack_frame,
     unpack_frame,
 )
-from avi.providers.base import TargetedResponseCancellation, VoiceProvider
+from avi.providers.base import TargetedResponseCancellation, TokenUsageReporter, VoiceProvider
 from avi.transports.base import TransportDisconnected, TransportFrameError
 
 logger = logging.getLogger(__name__)
@@ -173,7 +173,7 @@ class AvipSession:
         self.transport = transport
         self.limits = limits
         self.available = replace(
-            available, durable_runs=durable_controls is not None,
+            available, durable_runs=durable_controls is not None, voice_path_report=True,
             response_cancel=isinstance(provider, TargetedResponseCancellation)
             and provider.capabilities.response_cancellation,
             durable_run_discovery=durable_controls is not None,
@@ -266,6 +266,8 @@ class AvipSession:
         self.delivery = MediaDelivery()
         if self._should_open_provider():
             await self._open_provider()
+        if self.negotiated.voice_path_report:
+            ready["voice_path"] = "provider" if self._provider_open else "mock-mirror"
         await self._send(ready)
         self.session_id = ready["session_id"]
         self.voice_session.activate(
@@ -702,6 +704,14 @@ class AvipSession:
             self.telemetry.note_sink(sink.high_water, sink.consumed)
         if self.session_id is not None:
             self.telemetry.set_session_id(self.session_id)
+        if isinstance(self.provider, TokenUsageReporter):
+            usage = self.provider.latest_token_usage()
+            if usage is not None:
+                self.telemetry.note_cost({
+                    "provider": usage.provider,
+                    "inputTokens": usage.input_tokens,
+                    "outputTokens": usage.output_tokens,
+                }, latest_provider_usage=True)
         self.telemetry_report = self.telemetry.report()
         logger.info(
             "voice_telemetry %s",
