@@ -12,3 +12,36 @@
 | Portability | Include browser and headless parity on the same build plus the two-way ROS mock action evidence from JEV-31. |
 
 **Report contract.** Each row records command, SHA, dependency versions, start/end, sample count, environment, result, evidence and limitations. Record measurement clock and any skipped or unavailable path. Keep operator-supplied keys out of artifacts. Publish a reproducible local quickstart, supported capability matrix, limitations, and instructions to disable Live or durable submissions while retaining access to existing runs. Explicitly list any missed provisional target with evidence and a proposed disposition for Jeven. Only update roadmap exit status after the corresponding evidence exists.
+
+### Recorded socket qualification
+
+Two Python SDK clients sent paced 20 ms PCM over separate loopback sockets. Every counted frame matched its expected bytes, direction, timestamp and sequence. The [raw measurements](evidence/socket-qualification.json) record the exact source tree, dependency versions, CPU time, peak memory and per-client counts. Each published source commit has the same Git tree as the revision recorded by its runner.
+
+| Build | Reproducible source | Duration | Frames verified | Planned reconnects | Unrecoverable failures |
+| --- | --- | ---: | ---: | ---: | ---: |
+| M4 baseline | [`1e4fc97`](https://github.com/nomi-bot/agent-voice-interface/commit/1e4fc97ff778090f46f7ef2d20dd387c7a1bfb47) | 30 min | 179,905 | 58 | 0 |
+| Integrated snapshot | [`f8d6c8f`](https://github.com/nomi-bot/agent-voice-interface/commit/f8d6c8f4fcc47be30e3ddc1505909947e09a46b6) | 30 min | 179,920 | 58 | 0 |
+| Final PR #25 source | [`acc4b4c`](https://github.com/nomi-bot/agent-voice-interface/commit/acc4b4c7cb44d335a2638c3535076307e52cf1b3) | 2 min | 11,994 | 6 | 0 |
+
+The two 30-minute runs exercised the mock gateway on an initial baseline and an integrated snapshot. The final PR source received a separate two-minute test after the telemetry changes. This workload produced no conversation turns or provider calls. Live-provider stability, acoustic measurements and spoken task accuracy retain their own release gates.
+
+### Headless mock socket stability
+
+From a Linux or macOS source checkout with Python 3.12+ and the default
+package dependencies, run the following command. Redirect the report outside
+the checkout to keep the measured revision clean.
+
+```bash
+PYTHONPATH=src python scripts/mock_socket_soak.py > /tmp/avi-socket-soak.json
+```
+
+The runner launches its own loopback-only Uvicorn process on an ephemeral
+port, using the mock PCM mirror with no credentials. Two independent Python
+SDK clients send distinct synthetic 20 ms frames, verify every returned
+payload, direction, sequence and timestamp, and reopen their sockets every
+60 seconds. A missing frame, invalid mirror or failed reconnection fails the
+run. The JSON contains per-client counts, process CPU, peak memory, versions
+and revision. For a quick preflight use `--seconds 5 --reconnect-seconds 2`.
+Only the full 1800-second load qualifies the mock socket stability row.
+Browser audio, real provider latency, barge-in and task execution each need
+their own evidence.

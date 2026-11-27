@@ -1,9 +1,16 @@
 import json
 
 from fastapi import WebSocket, WebSocketDisconnect
-from starlette.websockets import WebSocketDisconnected
+from starlette import websockets
 
 from avi.transports.base import TransportDisconnected, TransportFrameError
+
+
+# Newer Starlette versions use a separate RuntimeError for reads after close.
+_READ_DISCONNECTS = (
+    WebSocketDisconnect,
+    getattr(websockets, "WebSocketDisconnected", WebSocketDisconnect),
+)
 
 
 class WebSocketTransport:
@@ -25,7 +32,7 @@ class WebSocketTransport:
         """
         try:
             message = await self.websocket.receive()
-        except (WebSocketDisconnect, WebSocketDisconnected) as exc:
+        except _READ_DISCONNECTS as exc:
             raise TransportDisconnected from exc
         if message["type"] == "websocket.disconnect":
             raise TransportDisconnected
