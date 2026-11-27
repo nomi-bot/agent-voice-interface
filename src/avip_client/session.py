@@ -5,6 +5,7 @@ audio. It does not reconnect, and it does not start an agent run.
 """
 
 from collections.abc import Mapping
+from inspect import signature
 
 from websockets.exceptions import ConnectionClosed
 
@@ -62,11 +63,14 @@ class AvipClient:
     async def __aenter__(self):
         from websockets.asyncio.client import connect
 
+        # Before websockets 15 connections are direct and extra keywords are
+        # forwarded to the event loop, which does not accept "proxy".
+        proxy_options = {"proxy": None} if "proxy" in signature(connect).parameters else {}
         self._ws = await connect(
             self.url,
             origin=self.origin,
             compression=None,
-            proxy=None,
+            **proxy_options,
             max_size=16 * 1024,
             max_queue=_RECEIVE_QUEUE,
             user_agent_header=None,
