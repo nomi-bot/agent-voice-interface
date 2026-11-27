@@ -29,7 +29,7 @@ from typing import NoReturn, Protocol
 
 from avi.telemetry import VoiceTelemetry
 
-from avi.core.durable_auth import AuthenticatedConnection
+from avi.core.durable_auth import AccessDenied, AuthenticatedConnection
 from avi.core.downlink import DownlinkPacer
 from avi.core.durable_controls import DurableControls
 from avi.core.events import VoiceEvent
@@ -213,10 +213,14 @@ class AvipSession:
         self._downlink_sequence = 0
         self._downlink_timestamp = 0
 
-    async def _send(self, payload: dict) -> None:
+    async def _send(
+        self, payload: dict, *, authorize: Callable[[], None] | None = None,
+    ) -> None:
         try:
             async with self._send_lock:
                 async with asyncio.timeout(self.limits.send_timeout):
+                    if authorize is not None:
+                        authorize()
                     await self.transport.send(payload)
         except TimeoutError:
             self.telemetry.note_timeout("send")
@@ -411,8 +415,16 @@ class AvipSession:
         discovery = self.negotiated.durable_run_discovery
         while True:
             message = await self._control_queue.get()
-            async for reply in controls.replies(message, discovery=discovery):
-                await self._send(reply)
+            try:
+                async for reply in controls.replies(message, discovery=discovery):
+                    if reply["type"] == "error":
+                        await self._send(reply)
+                    else:
+                        await self._send(reply, authorize=lambda: controls.authorize_delivery(message["type"]))
+            except AccessDenied:
+                # End this response sequence. Never send its remaining replay
+                # events or advance the cursor once the grant no longer applies.
+                await self._send(error_envelope(ProtocolError("access_denied")))
 
     def _should_open_provider(self) -> bool:
         negotiated = self.negotiated

@@ -33,3 +33,19 @@ and revision. For a quick preflight use `--seconds 5 --reconnect-seconds 2`.
 Only the full 1800-second load qualifies the mock socket stability row.
 Browser audio, real provider latency, barge-in and task execution each need
 their own evidence.
+
+### Chromium synthetic-device acceptance
+
+To exercise the rendered page with an actual Chromium engine, free loopback
+port 8000, install Python Playwright in the AVI test environment, and point
+`AVI_TEST_CHROMIUM` at a matching Chromium executable. Run from the checkout:
+
+```bash
+AVI_TEST_CHROMIUM=/path/to/chromium PYTHONPATH=src python tests/test_chromium_qualification.py -v
+```
+
+The temporary gateway seeds a retained synthetic result. The browser finds
+the run, reads the result and replays events, then uses a fake media device
+through the page's microphone, AudioWorklet, mock mirror and WebAudio path.
+It verifies uplink continues after local playback stops and ends the session.
+The synthetic media check measures scheduled playback only.

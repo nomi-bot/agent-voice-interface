@@ -36,6 +36,19 @@ class DurableControls:
         self._approve_query = approve_query
         self.connection: AuthenticatedConnection | None = None
 
+    def authorize_delivery(self, operation: str) -> None:
+        """Check the command's grant immediately before a successful wire reply."""
+        if operation == "agent.run.authenticate":
+            self._credentials.require(self.connection)
+        elif operation == "agent.run.attach":
+            self._credentials.require(
+                self.connection, RunPermission.ATTACH, RunPermission.PROGRESS, RunPermission.RESULT,
+            )
+        elif operation == "agent.run.recent":
+            self._credentials.require(self.connection, RunPermission.DISCOVER, RunPermission.STATUS)
+        else:
+            self._credentials.require(self.connection, RunPermission(operation.removeprefix("agent.run.")))
+
     async def replies(self, message: dict, *, discovery: bool = False) -> AsyncIterator[dict]:
         """Map expected operation errors to stable redacted frames."""
         try:

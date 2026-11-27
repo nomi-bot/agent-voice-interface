@@ -215,6 +215,7 @@ class AvipWebSocketTests(unittest.IsolatedAsyncioTestCase):
     async def test_non_json_and_binary_frames_are_discarded(self):
         frames = (
             ("text", TOKEN, None, 1002, "Protocol error"),
+            ("text", '{"type":NaN}', None, 1002, "Protocol error"),
             ("bytes", None, b"\xff" + TOKEN.encode(), 1003, "Unsupported data"),
         )
         async with app.router.lifespan_context(app):

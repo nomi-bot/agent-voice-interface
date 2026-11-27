@@ -3,6 +3,7 @@
 import asyncio
 from contextlib import asynccontextmanager
 from pathlib import Path
+from unittest.mock import patch
 import tempfile
 import unittest
 
@@ -31,7 +32,7 @@ class NegotiatedControlTests(unittest.IsolatedAsyncioTestCase):
         )
 
     @asynccontextmanager
-    async def socket(self):
+    async def socket(self, *, discover=False):
         gate = Gate()
         controls = DurableControls(self.service, self.credentials, approve_query=lambda _, q: q == "synthetic query")
         session = AvipSession(
@@ -39,9 +40,16 @@ class NegotiatedControlTests(unittest.IsolatedAsyncioTestCase):
         )
         task = asyncio.create_task(session.run())
         try:
-            await gate.inbox.put(("text", _FIXTURE["positive"]["start"]))
+            start = dict(_FIXTURE["positive"]["start"])
+            caps = dict(start["capabilities"])
+            if discover:
+                caps["durable_run_discovery"] = True
+            await gate.inbox.put(("text", {**start, "capabilities": caps}))
             ready = await asyncio.wait_for(gate.next_item(), 2)
-            self.assertEqual(ready["capabilities"], _FIXTURE["positive"]["ready"]["capabilities"])
+            expected = dict(_FIXTURE["positive"]["ready"]["capabilities"])
+            if discover:
+                expected["durable_run_discovery"] = True
+            self.assertEqual(ready["capabilities"], expected)
             yield gate
         finally:
             await gate.inbox.put(None)
@@ -83,6 +91,25 @@ class NegotiatedControlTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(await self.request(foreign, "cancel", run_id=run_id), _FIXTURE["access_denied"]["reply"])
         self.assertEqual(len(self.backend.submissions), 1)
         self.assertFalse(self.backend.cancellations)
+
+    async def test_recent_requires_separate_negotiation_and_both_grants(self):
+        async with self.socket() as first:
+            await self.authenticate(first, self.token)
+            run = await self.submit(first)
+        async with self.socket(discover=True) as fresh:
+            await self.authenticate(fresh, self.token)
+            metadata = await self.request(fresh, "recent")
+            self.assertEqual(metadata, {
+                "protocol": "avip/1", "type": "agent.run.recent",
+                "runs": [{"run_id": run["run_id"], "state": "running"}],
+            })
+        async with self.socket(discover=True) as limited:
+            token = self.credentials.issue("alice", [RunPermission.STATUS])
+            await self.authenticate(limited, token)
+            self.assertEqual(await self.request(limited, "recent"), _FIXTURE["access_denied"]["reply"])
+        async with self.socket(discover=True) as foreign:
+            await self.authenticate(foreign, self.credentials.issue("bob", RunPermission))
+            self.assertEqual((await self.request(foreign, "recent"))["runs"], [])
 
     async def test_policy_schema_and_reauthentication(self):
         async with self.socket() as gate:
@@ -149,3 +176,39 @@ class NegotiatedControlTests(unittest.IsolatedAsyncioTestCase):
         finally:
             release.set()
             await self.service.settle_submissions()
+
+    async def test_revoke_before_transport_send_terminates_replay_without_cursor_receipt(self):
+        async with self.socket() as gate:
+            await self.authenticate(gate, self.token)
+            run = await self.submit(gate)
+            pending, release = asyncio.Event(), asyncio.Event()
+            original_send = AvipSession._send
+
+            async def congested(session, payload, **kwargs):
+                if payload["type"] == "agent.run.event":
+                    # Another sender holds the shared socket until the grant is
+                    # revoked. The replay frame has already left the database.
+                    await session._send_lock.acquire()
+                    pending.set()
+                    async def unlock():
+                        await release.wait()
+                        session._send_lock.release()
+                    unlocker = asyncio.create_task(unlock())
+                    try:
+                        return await original_send(session, payload, **kwargs)
+                    finally:
+                        await unlocker
+                return await original_send(session, payload, **kwargs)
+
+            with patch.object(AvipSession, "_send", congested):
+                attach = asyncio.create_task(self.request(gate, "attach", run_id=run["run_id"], after_cursor=0))
+                try:
+                    await asyncio.wait_for(pending.wait(), 2)
+                    self.credentials.revoke(self.token)
+                finally:
+                    release.set()
+                self.assertEqual(await attach, _FIXTURE["access_denied"]["reply"])
+                self.assertEqual(await self.request(gate, "status", run_id=run["run_id"]),
+                                 _FIXTURE["access_denied"]["reply"])
+            self.assertFalse(any(isinstance(row, dict) and row["type"] in {"agent.run.event", "agent.run.replay"}
+                                 for row in gate.sent))

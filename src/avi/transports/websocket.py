@@ -12,6 +12,9 @@ _READ_DISCONNECTS = (
     getattr(websockets, "WebSocketDisconnected", WebSocketDisconnect),
 )
 
+def _invalid_json_constant(_: str):
+    raise ValueError("Non-finite JSON constant")
+
 
 class WebSocketTransport:
     def __init__(self, websocket: WebSocket):
@@ -39,8 +42,8 @@ class WebSocketTransport:
         text = message.get("text")
         if isinstance(text, str):
             try:
-                value = json.loads(text)
-            except json.JSONDecodeError:
+                value = json.loads(text, parse_constant=_invalid_json_constant)
+            except (ValueError, RecursionError):
                 raise TransportFrameError(binary=False) from None
             if not isinstance(value, dict):
                 raise TransportFrameError(binary=False)
