@@ -25,6 +25,13 @@ _ERROR_CODES = frozenset({
     "sequence_anomaly",
     "timestamp_regression",
     "queue_full",
+    "access_denied",
+    "request_conflict",
+    "admissions_closed",
+    "invalid_cursor",
+    "operation_unsupported",
+    "operation_failed",
+    "outcome_uncertain",
 })
 _ERROR_FIELDS = frozenset(_START_FIELDS | {
     "magic",
@@ -36,6 +43,11 @@ _ERROR_FIELDS = frozenset(_START_FIELDS | {
     "timestamp_us",
     "payload",
     "header",
+    "run_id",
+    "response_id",
+    "kind",
+    "arguments",
+    "after_cursor",
 })
 
 
@@ -61,6 +73,9 @@ class Capabilities:
     camera: bool = False
     display: bool = False
     robot_actions: bool = False
+    response_cancel: bool = False
+    durable_runs: bool = False
+    durable_run_discovery: bool = False
 
 
 _CAPABILITY_NAMES = tuple(field.name for field in fields(Capabilities))
@@ -73,7 +88,7 @@ class SessionStart:
     capabilities: Capabilities
 
 
-def _identifier(value: object, field: str) -> str:
+def validate_identifier(value: object, field: str) -> str:
     if not isinstance(value, str) or _IDENTIFIER.fullmatch(value) is None:
         raise ProtocolError("invalid_message", field)
     return value
@@ -94,8 +109,8 @@ def parse_session_start(message: object) -> SessionStart:
         raise ProtocolError("unsupported_message_type", "type")
     if message["session_id"] is not None:
         raise ProtocolError("invalid_message", "session_id")
-    request_id = _identifier(message["request_id"], "request_id")
-    device_id = _identifier(message["device_id"], "device_id")
+    request_id = validate_identifier(message["request_id"], "request_id")
+    device_id = validate_identifier(message["device_id"], "device_id")
     capabilities = message["capabilities"]
     if not isinstance(capabilities, dict) or any(
         not isinstance(name, str) or type(value) is not bool
@@ -141,10 +156,29 @@ def error_envelope(error: ProtocolError) -> dict:
 
 def negotiate_capabilities(requested: Capabilities, available: Capabilities) -> Capabilities:
     """Select only features requested by the client and supported by the gateway."""
-    return Capabilities(**{
-        name: getattr(requested, name) and getattr(available, name)
-        for name in _CAPABILITY_NAMES
-    })
+    accepted = {name: getattr(requested, name) and getattr(available, name) for name in _CAPABILITY_NAMES}
+    if not accepted["audio_output"]:
+        accepted["response_cancel"] = False
+    if not accepted["durable_runs"]:
+        accepted["durable_run_discovery"] = False
+    return Capabilities(**accepted)
+
+
+def response_interrupted(generation: int) -> dict:
+    """Tell the client to flush one playback generation.
+
+    ``protocol`` is the AVIP version. ``generation`` is the generation that
+    was playing. Audio sent after this message is the next generation. The
+    payload has no PCM and no provider detail.
+    """
+
+    if type(generation) is not int or not 0 <= generation <= 1_000_000:
+        raise ValueError("generation")
+    return {
+        "protocol": PROTOCOL,
+        "type": "response.interrupted",
+        "generation": generation,
+    }
 
 
 def session_ready(start: SessionStart, session_id: str, available: Capabilities) -> dict:
@@ -153,10 +187,14 @@ def session_ready(start: SessionStart, session_id: str, available: Capabilities)
     This pure contract helper does not create a live session or wire up a provider.
     Callers must advertise actual enabled support, not planned capabilities.
     """
+    capabilities = asdict(negotiate_capabilities(start.capabilities, available))
+    for extension in ("durable_runs", "durable_run_discovery", "response_cancel"):
+        if not capabilities[extension]:
+            del capabilities[extension]
     return {
         "protocol": PROTOCOL,
         "type": "session.ready",
         "request_id": start.request_id,
-        "session_id": _identifier(session_id, "session_id"),
-        "capabilities": asdict(negotiate_capabilities(start.capabilities, available)),
+        "session_id": validate_identifier(session_id, "session_id"),
+        "capabilities": capabilities,
     }

@@ -1,6 +1,10 @@
 import asyncio
 from pathlib import Path
+import sqlite3
+import subprocess
+import sys
 import tempfile
+from textwrap import dedent
 import unittest
 
 from avi.agents.base import AgentCapabilities, Run
@@ -111,6 +115,89 @@ class LegacyCutoverTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.durable_submit("first")).run_id, durable.run_id)
         self.assertEqual((await self.service.status(self.connection, durable.run_id)).run_id, durable.run_id)
         await legacy.close()
+
+    async def test_process_exit_with_unknown_or_known_handle_blocks_cutover(self):
+        for stage in ("in_submit", "after_acceptance"):
+            with self.subTest(stage=stage):
+                path = self.path.with_name(stage + ".db")
+                # Terminate abruptly: no Python task cleanup or finalizer can settle the ledger.
+                child = dedent("""
+                    import asyncio, os, sys
+                    from pathlib import Path
+                    from avi.agents.mock import MockAgentAdapter
+                    from avi.core.durable_store import SQLiteRunStore
+                    from avi.core.legacy_cutover import LegacyCutover
+
+                    class Adapter(MockAgentAdapter):
+                        async def submit(self, request):
+                            if sys.argv[2] == "in_submit":
+                                os._exit(42)
+                            return await super().submit(request)
+
+                    async def main():
+                        gate = LegacyCutover(SQLiteRunStore(Path(sys.argv[1])))
+                        await gate.track(Adapter(delay=99)).submit("private fixture")
+                        gate.begin()
+                        os._exit(42)
+
+                    asyncio.run(main())
+                """)
+                status = subprocess.run([sys.executable, "-c", child, str(path), stage],
+                                        timeout=10, capture_output=True)
+                self.assertEqual(status.returncode, 42, status.stderr)
+                store = SQLiteRunStore(path)
+                recovered = LegacyCutover(store)
+                if stage == "after_acceptance":
+                    with self.assertRaises(AdmissionsClosed):
+                        await recovered.track(MockAgentAdapter()).submit("new")
+                recovered.begin()
+                with self.assertRaises(CutoverBlocked):
+                    await recovered.enable_durable(cancel=True)
+                [(ticket, session, handle)] = store.unresolved_legacy()
+                self.assertTrue(ticket)
+                self.assertNotIn(b"private fixture", path.read_bytes())
+                if stage == "in_submit":
+                    self.assertIsNone(handle)
+                else:
+                    adapter = PausedLegacyAdapter()
+                    adapter.run = Run("different-handle", "completed")
+                    self.assertFalse(await recovered.reconcile_known_run(session, handle, adapter))
+                    adapter.run = Run(handle, "running")
+                    self.assertFalse(await recovered.reconcile_known_run(session, handle, adapter))
+                    adapter.run = Run(handle, "completed")
+                    self.assertTrue(await recovered.reconcile_known_run(session, handle, adapter))
+                    await recovered.enable_durable()
+                    self.assertEqual(store.legacy_outcomes()[0].status, "completed")
+
+    async def test_only_confirmed_local_rejections_release_the_ticket(self):
+        bounded = self.cutover.track(MockAgentAdapter())
+        with self.assertRaises(ValueError):
+            await bounded.submit(" ")
+        self.assertFalse(self.store.unresolved_legacy())
+
+        class UncertainAdapter(PausedLegacyAdapter):
+            async def submit(self, request):
+                raise ValueError("could not decode remote receipt")
+
+        with self.assertRaises(ValueError):
+            await self.cutover.track(UncertainAdapter()).submit("fixture")
+        self.cutover.begin()
+        with self.assertRaises(CutoverBlocked):
+            await self.cutover.enable_durable()
+
+    async def test_v1_database_upgrades_and_preserves_cutover_receipts(self):
+        # Build a v1 fixture by removing the two additive v2 tables.
+        with sqlite3.connect(self.path) as db:
+            db.execute("DROP TABLE legacy_freeze")
+            db.execute("DROP TABLE legacy_admissions")
+            db.execute("PRAGMA user_version = 1")
+            db.execute("INSERT INTO legacy_cutover_outcomes VALUES ('session','run','failed',1)")
+        store = SQLiteRunStore(self.path)
+        gate = LegacyCutover(store)
+        with self.assertRaises(AdmissionsClosed):
+            await gate.track(MockAgentAdapter()).submit("new")
+        await gate.enable_durable()
+        self.assertEqual(store.legacy_outcomes()[0].status, "failed")
 
     async def test_disconnect_keeps_the_original_mock_cleanup_policy(self):
         legacy = self.cutover.track(MockAgentAdapter(delay=10))

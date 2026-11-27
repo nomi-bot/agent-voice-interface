@@ -1,6 +1,6 @@
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 from avi.core.events import VoiceEvent
 
@@ -21,3 +21,10 @@ class VoiceProvider(Protocol):
     async def tool_result(self, call_id: str, result: dict) -> None: ...
     async def cancel_response(self) -> None: ...
     async def close(self) -> None: ...
+
+
+@runtime_checkable
+class TargetedResponseCancellation(Protocol):
+    """Providers label audible events with a session-local response ID."""
+
+    async def cancel_response_if_current(self, response_id: int) -> None: ...

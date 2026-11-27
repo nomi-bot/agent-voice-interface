@@ -12,6 +12,7 @@ from avi.core.durable_store import (
     DispatchState,
     JsonValue,
     Observation,
+    RecentRun,
     RunReplay,
     RunResult,
     RunSnapshot,
@@ -32,6 +33,10 @@ class DispatchError(Exception):
             raise ValueError("Invalid dispatch outcome")
         self.outcome = outcome
         super().__init__(f"Provider operation {outcome}")
+
+
+class SubmissionQueueFull(RuntimeError):
+    """All process-owned wire admission slots are occupied."""
 
 
 class Unsupported(RuntimeError):
@@ -63,11 +68,16 @@ class DurableRunService:
         admissions_open: bool = False,
         legacy_cutover: LegacyCutover | None = None,
         operation_timeout: float = 30,
+        max_wire_submissions: int = 32,
     ):
         if not isfinite(operation_timeout) or operation_timeout <= 0:
             raise ValueError("Operation timeout must be positive and finite")
         if not isinstance(backend_scope, str) or not 0 < len(backend_scope) <= 128:
             raise ValueError("Backend scope must be a stable nonsecret identifier")
+        if type(max_wire_submissions) is not int or max_wire_submissions < 1:
+            raise ValueError("Wire submission capacity must be a positive integer")
+        self._max_wire_submissions = max_wire_submissions
+        self._wire_submissions: set[asyncio.Task[RunSnapshot]] = set()
         self._backend_scope = backend_scope
         self._store = store
         self._credentials = credentials
@@ -80,6 +90,28 @@ class DurableRunService:
         return self._admissions_open and (
             self._legacy_cutover is None or self._legacy_cutover.durable_enabled
         )
+
+    async def submit_from_socket(
+        self, connection: AuthenticatedConnection | None, request_id: str, kind: str,
+        arguments: dict[str, JsonValue],
+    ) -> RunSnapshot:
+        """Keep one admitted operation alive if its waiting socket closes."""
+        if len(self._wire_submissions) >= self._max_wire_submissions:
+            raise SubmissionQueueFull("Wire submission capacity exhausted")
+        task = asyncio.create_task(self.submit(connection, request_id, kind, arguments))
+        self._wire_submissions.add(task)
+        task.add_done_callback(self._wire_submission_done)
+        return await asyncio.shield(task)
+
+    def _wire_submission_done(self, task: asyncio.Task[RunSnapshot]) -> None:
+        self._wire_submissions.discard(task)
+        if not task.cancelled():
+            task.exception()  # A disconnected peer may no longer be awaiting it.
+
+    async def settle_submissions(self) -> None:
+        """Drain issued operations after closing admissions and before backend shutdown."""
+        if self._wire_submissions:
+            await asyncio.gather(*tuple(self._wire_submissions), return_exceptions=True)
 
     async def submit(
         self,
@@ -150,6 +182,13 @@ class DurableRunService:
         )
         self._credentials.require(connection, RunPermission.STATUS)
         return snapshot
+
+    async def recent(self, connection: AuthenticatedConnection | None) -> tuple[RecentRun, ...]:
+        permissions = (RunPermission.DISCOVER, RunPermission.STATUS)
+        owner = self._credentials.require(connection, *permissions)
+        runs = await asyncio.to_thread(self._store.recent, owner)
+        self._credentials.require(connection, *permissions)
+        return runs
 
     async def status(self, connection: AuthenticatedConnection | None, run_id: str) -> RunSnapshot:
         owner = self._credentials.require(connection, RunPermission.STATUS)

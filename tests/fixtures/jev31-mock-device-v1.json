@@ -1,0 +1,19 @@
+{
+  "observation": {
+    "event_id": "sample-001",
+    "kind": "sensor.observation",
+    "capability": "synthetic_sensor",
+    "payload": {"sample": 37}
+  },
+  "action": {
+    "event_id": "sample-001",
+    "kind": "record_sample",
+    "capability": "robot_actions",
+    "payload": {"sample": 37}
+  },
+  "max_message_bytes": 256,
+  "sample_range": [0, 100],
+  "work_ms": 50,
+  "timeout_ms": 250,
+  "lifecycle": ["accepted", "running", "completed"]
+}

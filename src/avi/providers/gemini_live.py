@@ -1,9 +1,9 @@
 """Gemini Live adapter for the ``VoiceProvider`` port.
 
-The gateway does not construct this class. ``/ws/avip`` still drains uplink
-with ``MockMediaSink`` and mirrors 16 kHz PCM. A process that wants a Live
-session constructs ``GeminiLiveProvider`` itself and keeps the API key in the
-server environment.
+``/ws/avip`` constructs this class when ``GEMINI_API_KEY`` and
+``GEMINI_LIVE_MODEL`` are both set. Otherwise the socket keeps
+``MockMediaSink`` and the 16 kHz PCM mirror. The API key stays in the server
+environment. This module does not load a dotenv file.
 
 ``GEMINI_API_KEY`` and ``GEMINI_LIVE_MODEL`` follow the spike: a missing key
 does not call the network, a key without a model fails closed, and
@@ -158,13 +158,13 @@ class _EventQueue:
         self.dropped_audio = 0
         self.flushed_audio = 0
 
-    def push_audio(self, payload: bytes) -> bool:
+    def push_audio(self, payload: bytes, response_id: int) -> bool:
         if self._closed or self.overflowed:
             return False
         if self._audio >= self._max_audio:
             self.dropped_audio += 1
             return False
-        self._items.append(VoiceEvent(kind="audio", payload=payload))
+        self._items.append(VoiceEvent(kind="audio", payload=payload, response_id=response_id))
         self._audio += 1
         self._wake.set()
         return True
@@ -345,7 +345,9 @@ class GeminiLiveProvider:
         self._resampler = StreamingResampler(output_rate_hz, AVIP_SAMPLE_RATE_HZ)
         self._source_rate = output_rate_hz
         self._seen_audio = False
+        self._response_id = 0
         self._suppress_audio = False
+        self._emitted_audio = False
         self.suppressed_audio_chunks = 0
         self._pending_tools: dict[str, str] = {}
         self._generation_complete = False
@@ -364,6 +366,12 @@ class GeminiLiveProvider:
 
     def __repr__(self) -> str:
         return f"GeminiLiveProvider(state={self._state}, model={self.model})"
+
+    def enable_delegation_tools(self) -> None:
+        """Declare the durable tools only on a gateway session that negotiated them."""
+        if self._state != "idle":
+            raise RuntimeError("tool declarations must precede provider start")
+        self._enable_delegation_tools = True
 
     async def start(self) -> None:
         async with self._lock:
@@ -432,6 +440,10 @@ class GeminiLiveProvider:
         if failure is not None:
             raise ProviderSessionError(failure)
 
+    async def cancel_response_if_current(self, response_id: int) -> None:
+        if response_id == self._response_id:
+            await self.cancel_response()
+
     async def cancel_response(self) -> None:
         """Interrupt the current generation.
 
@@ -444,7 +456,19 @@ class GeminiLiveProvider:
 
         if self._state != "open" or self._session is None:
             raise RuntimeError("provider is not open")
+        # Idle or repeated cancel must not arm a hold. A hold is released
+        # only by turn_complete, so an idle cancel would discard the next
+        # answer. A second cancel while a hold is already armed must not
+        # require a second turn_complete.
+        if self._suppress_audio or not self._emitted_audio:
+            return
         self._hold_generation()
+        self._events.push_control(
+            VoiceEvent(
+                kind="interrupted",
+                payload={"source": "cancel", "signal": CANCEL_SIGNAL},
+            )
+        )
         failure: str | None = None
         try:
             await self._session.send_client_content(turns=None, turn_complete=True)  # type: ignore[attr-defined]
@@ -452,12 +476,6 @@ class GeminiLiveProvider:
             failure = await self._fail(exc)
         if failure is not None:
             raise ProviderSessionError(failure)
-        self._events.push_control(
-            VoiceEvent(
-                kind="interrupted",
-                payload={"source": "cancel", "signal": CANCEL_SIGNAL},
-            )
-        )
 
     async def close(self) -> None:
         await self._shutdown()
@@ -587,7 +605,10 @@ class GeminiLiveProvider:
                 if self._emit_pcm(pcm, rate):
                     return True
         else:
-            self._hold_generation()
+            if self._emitted_audio or self._suppress_audio:
+                self._hold_generation()
+            else:
+                self._resampler.end_turn()
             self._events.push_control(
                 VoiceEvent(kind="interrupted", payload={"source": "server"})
             )
@@ -636,6 +657,8 @@ class GeminiLiveProvider:
 
         self._resampler.end_turn()
         self._suppress_audio = False
+        self._emitted_audio = False
+        self._response_id += 1
 
     def _emit_pcm(self, pcm: bytes, rate: int | None) -> bool:
         """Resample one downlink chunk. Return True when the session must stop."""
@@ -661,7 +684,8 @@ class GeminiLiveProvider:
             )
             return True
         if converted:
-            self._events.push_audio(converted)
+            self._events.push_audio(converted, self._response_id)
+            self._emitted_audio = True
             self.dropped_audio_events = self._events.dropped_audio
         return False
 

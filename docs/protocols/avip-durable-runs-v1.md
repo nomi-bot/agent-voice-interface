@@ -2,7 +2,7 @@
 
 This [JEV-28](https://linear.app/jevenzzh/issue/JEV-28) draft defines handoff
 fixtures for the opt-in [AVIP v1](avip-v1.md) control extension.
-Gateway registration and client operations land in subsequent PRs. The
+Servers with a configured service negotiate these operations with compatible clients. The
 [fixtures](../../tests/fixtures/jev28-durable-runs-v1.json) include synthetic
 positive, denied, unsupported, malformed and legacy traces.
 
@@ -36,7 +36,8 @@ These operation errors leave the session open for media.
 Each message is one AVIP text frame with `protocol: "avip/1"` and `type`. This
 table lists the remaining required fields. One operation at a time per socket
 keeps existing AVIP error correlation by request order, while audio can
-continue. Replay sends frames in cursor order followed by a receipt.
+continue. The worker buffers at most one waiting operation. Exceeding
+that bound closes the socket with 1013. Replay sends frames in cursor order followed by a receipt.
 A client advances a cursor only after consuming the associated event or
 snapshot. Cursors are exclusive, nonnegative JSON safe integers.
 
@@ -72,9 +73,26 @@ configured retained event count and uses one event per frame.
 Known request field errors return `invalid_message` with an allowlisted
 field or null. Other operation errors use a null field and one of
 `access_denied`, `request_conflict`, `admissions_closed`, `invalid_cursor`,
-or `operation_unsupported`. A non-object or malformed JSON frame still
+or `operation_unsupported`. A failed cancellation can additionally return
+`operation_failed` or `outcome_uncertain`. A non-object or malformed JSON frame still
 follows the existing `invalid_message` and close 1002 behavior. Existing
 frame-size and send-timeout policies apply.
+
+## Optional recent-run discovery
+
+A fresh client that has lost its run ID can request both `durable_runs` and
+`durable_run_discovery` in the handshake. Authenticate only after the server
+negotiates both. Then send `{"protocol":"avip/1","type":"agent.run.recent"}`.
+The request accepts no fields for owner, search, paging or filters. The server
+checks the authenticated principal's `discover` and `status` grants.
+
+The reply has the same protocol and type with a `runs` array of up to 16
+objects, each containing only `run_id` and `state`. Results are scoped to the
+authenticated owner, ordered by creation time descending with descending run ID
+as the tie breaker. Active runs and terminal runs within result retention are
+eligible. An empty list is a successful reply. Fetching a result or attaching
+to a chosen ID requires that operation's own permissions. Older clients may
+continue to recover by known ID using only `durable_runs`.
 
 ## Local service behavior
 

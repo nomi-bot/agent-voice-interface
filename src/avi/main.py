@@ -1,16 +1,24 @@
-"""Local-only development gateway. This skeleton has no live voice provider."""
-import os
+"""Local-only development gateway.
+
+``/ws/avip`` mounts the configured voice provider when credentials are
+complete. Otherwise ``AVIP_MOCK_MEDIA=1`` keeps the PCM mirror. A missing
+model does not guess one. The provider key stays in the process environment.
+"""
 from collections.abc import Mapping
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, WebSocket
+from fastapi import FastAPI, HTTPException, Request, WebSocket
 from fastapi.responses import FileResponse
 
 from avi.agents.mock import MockAgentAdapter
 from avi.core.avip_session import AvipSession
 from avi.core.session import ControlSession, SessionLimits
+from avi.core.durable_controls import DurableControls
+from avi.core.durable_store import AdmissionsClosed, RunConflict
+from avi.core.voice_delegation import VoiceToolSession
 from avi.protocols.avip import Capabilities
+from avi.providers.mount import attach_voice, resolve_voice_mount
 from avi.transports.websocket import WebSocketTransport
 
 
@@ -73,33 +81,42 @@ def _browser_file(name: str) -> Path:
 
 
 def development_capabilities(environ: Mapping[str, str] | None = None) -> Capabilities:
-    """Return the features this process can actually negotiate.
+    """Return the audio features this process can honestly advertise.
 
-    The default is none. ``AVIP_MOCK_MEDIA=1`` enables the M0 PCM mirror for
-    every client: audio input and audio output only. It does not enable a
-    voice provider, camera, display, or robot actions. Any other value leaves
-    every capability false.
+    Live credentials and ``AVIP_MOCK_MEDIA=1`` both advertise audio input and
+    audio output. Neither enables camera, display, or robot actions. Any
+    other environment leaves every capability false. Live wins when the key
+    and the model are both set, including when the mock flag is also set.
     """
-    source = os.environ if environ is None else environ
-    if source.get("AVIP_MOCK_MEDIA") == "1":
-        return Capabilities(audio_input=True, audio_output=True)
-    return Capabilities()
+    return resolve_voice_mount(environ).capabilities
 
 
-AVIP_CAPABILITIES = development_capabilities()
+# Tests patch this to drive a partial capability set. It applies only when
+# the resolved mode is not configured. Mock and Live ignore it and use
+# ``resolve_voice_mount`` instead, so an import-time snapshot cannot hide a
+# later credential or force Live during a mock-media test.
+AVIP_CAPABILITIES = Capabilities()
 
 
 @app.get("/health")
-async def health():
-    return {"status": "ok", "voice": "not_implemented", "agent": "mock"}
+async def health(request: Request):
+    """Report the voice path this process will mount. No key and no model id."""
+    mount = resolve_voice_mount()
+    return {
+        "status": "ok",
+        "voice": mount.mode,
+        "voice_reason": mount.reason,
+        "agent": "durable" if getattr(request.app.state, "durable_runtime", None) else "mock",
+    }
 
 
 @app.get("/voice")
 async def voice_demo():
     """Serve the local microphone and speaker page.
 
-    The page is a development client for ``/ws/avip``. It is not a voice
-    provider. ``AVIP_MOCK_MEDIA=1`` is what negotiates the PCM mirror.
+    The page is a development client for ``/ws/avip``. It does not hold a
+    provider key. Live audio is negotiated when the process is configured;
+    ``AVIP_MOCK_MEDIA=1`` negotiates the PCM mirror when Live is not.
     """
     return FileResponse(
         _browser_file("voice.html"),
@@ -128,6 +145,9 @@ async def session(websocket: WebSocket):
         return
     await websocket.accept()
     agent = MockAgentAdapter()
+    runtime = getattr(websocket.app.state, "durable_runtime", None)
+    if runtime is not None:
+        agent = runtime.cutover.track(agent)
     transport = WebSocketTransport(websocket)
     app.state.active_sessions += 1
     try:
@@ -141,16 +161,38 @@ async def session(websocket: WebSocket):
 @app.websocket("/ws/avip")
 async def avip_session(websocket: WebSocket):
     # Defense in depth for local development; this is not remote authentication.
-    # This path speaks only the AVIP handshake. It does not run legacy control
-    # messages and it does not create agent runs.
+    # Each socket negotiates durable controls and authenticates independently.
     if websocket.headers.get("origin") not in ALLOWED_ORIGINS:
         await websocket.close(code=1008)
         return
     await websocket.accept()
     app.state.active_sessions += 1
     try:
+        voice = attach_voice(AVIP_CAPABILITIES)
+        runtime = getattr(websocket.app.state, "durable_runtime", None)
+        controls = None
+        voice_tools_factory = None
+        if runtime is not None:
+            controls = DurableControls(runtime.runs, runtime.credentials, approve_query=runtime.approve_query)
+
+            def voice_tools_factory(session_id, connection, provider):
+                return VoiceToolSession(
+                    session_id=session_id, connection=connection, provider=provider,
+                    runs=runtime.runs, approve_query=runtime.approve_query, journal=runtime.journal,
+                    run_conflict=RunConflict, admissions_closed=AdmissionsClosed,
+                    authorize_reply=runtime.credentials.require,
+                )
+
         await AvipSession(
-            WebSocketTransport(websocket), SESSION_LIMITS, AVIP_CAPABILITIES
+            WebSocketTransport(websocket),
+            SESSION_LIMITS,
+            voice.capabilities,
+            provider=voice.provider,
+            telemetry_path=voice.telemetry_path,
+            telemetry_scenario=voice.telemetry_scenario,
+            elicit=voice.elicit,
+            durable_controls=controls,
+            voice_tools_factory=voice_tools_factory,
         ).run()
     finally:
         app.state.active_sessions -= 1

@@ -119,6 +119,46 @@ class DurableRunTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(str(foreign.exception), str(unknown.exception))
         self.assertEqual(self.backend.cancellations, [])
 
+    async def test_recent_finds_only_newest_owned_recoverable_runs_after_restart(self):
+        expired = await self.submit("old-terminal")
+        await self.service.cancel(self.alice, expired.run_id)
+        self.clock.now += self.retention.results_ttl
+        self.assertEqual(await self.service.recent(self.alice), ())
+        expected = []
+        for index in range(18):
+            self.clock.now += 1
+            run = await self.submit(f"query-{index}")
+            expected.insert(0, run.run_id)
+        await self.service.cancel(self.alice, expected[0])
+        foreign = await self.service.submit(self.bob, "query-17", "inspect", {"item": "private"})
+        service = self.reopen(admissions_open=False)
+        alice = self.credentials.authenticate(self.credentials.issue(
+            "alice", [RunPermission.DISCOVER, RunPermission.STATUS],
+        ))
+        recent = await service.recent(alice)
+        self.assertEqual([entry.run_id for entry in recent], expected[:16])
+        self.assertEqual(recent[0].state, AgentRunState.CANCELLED)
+        self.assertEqual(set(vars(recent[0])), {"run_id", "state"})
+        self.assertEqual([entry.run_id for entry in await service.recent(self.bob)], [foreign.run_id])
+        with self.assertRaises(AccessDenied):
+            await service.result(alice, expected[0])
+
+    async def test_recent_permissions_and_revocation_during_query(self):
+        for granted in ((RunPermission.STATUS,), (RunPermission.DISCOVER,), (RunPermission.RESULT,)):
+            connection = self.credentials.authenticate(self.credentials.issue("alice", granted))
+            with self.assertRaises(AccessDenied):
+                await self.service.recent(connection)
+
+        real_recent = SQLiteRunStore.recent
+
+        def revoke_during_lookup(store, owner):
+            rows = real_recent(store, owner)
+            self.credentials.revoke(self.alice_token)
+            return rows
+
+        with patch.object(SQLiteRunStore, "recent", revoke_during_lookup), self.assertRaises(AccessDenied):
+            await self.service.recent(self.alice)
+
     async def test_permissions_are_checked_per_operation_and_again_after_revocation(self):
         run = await self.submit()
         reader = self.credentials.authenticate(self.credentials.issue("alice", [RunPermission.STATUS]))

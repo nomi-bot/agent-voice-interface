@@ -1,10 +1,15 @@
 """Server-side correlations and reply attempts for voice tool calls."""
 
+from collections.abc import Callable
 from contextlib import closing
 from dataclasses import dataclass
 import os
 from pathlib import Path
 import sqlite3
+from math import isfinite
+from time import time
+
+from avi.core.durable_store import Retention
 
 
 class VoiceCallConflict(ValueError):
@@ -32,7 +37,14 @@ class VoiceToolDelivery:
 class VoiceToolJournal:
     """Persist a call binding independently from the run's execution state."""
 
-    def __init__(self, path: Path):
+    def __init__(
+        self, path: Path, *, retry_window: float = Retention().retry_window,
+        clock: Callable[[], float] = time,
+    ):
+        if not isfinite(retry_window) or retry_window <= 0:
+            raise ValueError("Journal retention must be positive and finite")
+        self._retry_window = retry_window
+        self._clock = clock
         self._path = path.resolve()
         os.close(os.open(self._path, os.O_CREAT | os.O_RDWR, mode=0o600))
         with closing(sqlite3.connect(self._path)) as db, db:
@@ -49,6 +61,38 @@ class VoiceToolJournal:
                     PRIMARY KEY (session_id, call_id)
                 )"""
             )
+
+            db.execute(
+                """CREATE TABLE IF NOT EXISTS closed_voice_sessions (
+                    session_id TEXT PRIMARY KEY, closed_at REAL NOT NULL
+                )"""
+            )
+
+    def close_session(self, session_id: str) -> None:
+        """Keep the tombstone even if the first detached write is still settling."""
+        with closing(sqlite3.connect(self._path)) as db, db:
+            db.execute(
+                "INSERT OR IGNORE INTO closed_voice_sessions VALUES (?, ?)",
+                (session_id, self._clock()),
+            )
+
+    def expire_abandoned_sessions(self) -> None:
+        """Single-process startup: former sockets, including pre-migration ones, are closed."""
+        with closing(sqlite3.connect(self._path)) as db, db:
+            db.execute(
+                """INSERT OR IGNORE INTO closed_voice_sessions
+                   SELECT DISTINCT session_id, ? FROM voice_tool_deliveries""",
+                (self._clock(),),
+            )
+
+    def prune(self) -> None:
+        cutoff = self._clock() - self._retry_window
+        with closing(sqlite3.connect(self._path)) as db, db:
+            db.execute(
+                """DELETE FROM voice_tool_deliveries WHERE session_id IN
+                   (SELECT session_id FROM closed_voice_sessions WHERE closed_at <= ?)""", (cutoff,),
+            )
+            db.execute("DELETE FROM closed_voice_sessions WHERE closed_at <= ?", (cutoff,))
 
     def begin(self, call: VoiceCall, fingerprint: str) -> tuple[bool, VoiceToolDelivery]:
         """Atomically distinguish a first delivery from an existing journal row."""

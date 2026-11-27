@@ -1,7 +1,7 @@
 import asyncio
 from uuid import uuid4
 
-from avi.agents.base import AgentCapabilities, Run
+from avi.agents.base import AgentCapabilities, Run, SubmissionRejected
 
 
 class MockAgentAdapter:
@@ -17,9 +17,9 @@ class MockAgentAdapter:
 
     async def submit(self, request: str) -> Run:
         if not request.strip() or len(request) > 4096:
-            raise ValueError("Request must contain 1–4096 characters")
+            raise SubmissionRejected("Request must contain 1–4096 characters")
         if len(self._runs) >= self.max_runs:
-            raise ValueError("Session run limit reached")
+            raise SubmissionRejected("Session run limit reached")
         run = Run(uuid4().hex, "running")
         self._runs[run.id] = run
         self._tasks[run.id] = asyncio.create_task(self._execute(run.id, request))

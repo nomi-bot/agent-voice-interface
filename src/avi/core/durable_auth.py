@@ -23,6 +23,7 @@ class AccessDenied(PermissionError):
 class RunPermission(StrEnum):
     SUBMIT = "submit"
     STATUS = "status"
+    DISCOVER = "discover"
     RESULT = "result"
     PROGRESS = "progress"
     ATTACH = "attach"
